@@ -98,10 +98,43 @@ const APP_CONFIG = (() => {
     return `${p.y}-${pad2(p.m)}-${pad2(p.d)}T${pad2(p.hh)}:${pad2(p.mm)}:${pad2(p.ss)}`;
   }
 
+  const DEFAULT_PM_TARGET_DAYS = 30;
+
+  function pmProgressPercent(cumulativeSec, pmTargetDays) {
+    const targetDays = (pmTargetDays == null || !Number.isFinite(pmTargetDays) || pmTargetDays <= 0)
+      ? DEFAULT_PM_TARGET_DAYS : pmTargetDays;
+    const cumulativeDays = Math.max(0, cumulativeSec || 0) / 86400;
+    return Math.min(100, Math.max(0, (cumulativeDays / targetDays) * 100));
+  }
+
+  // RGB triples must stay in sync with :root --green/--amber/--red in index.html
+  // (theme-invariant, so a JS-side constant is safe).
+  const PM_COLOR_STOPS = [
+    { pct: 0, rgb: [22, 163, 74] },   // --green  #16a34a
+    { pct: 50, rgb: [217, 119, 6] },  // --amber  #d97706
+    { pct: 100, rgb: [220, 38, 38] }, // --red    #dc2626
+  ];
+
+  function pmFillColor(pct) {
+    const p = Math.min(100, Math.max(0, pct));
+    let lo = PM_COLOR_STOPS[0], hi = PM_COLOR_STOPS[PM_COLOR_STOPS.length - 1];
+    for (let i = 0; i < PM_COLOR_STOPS.length - 1; i++) {
+      if (p >= PM_COLOR_STOPS[i].pct && p <= PM_COLOR_STOPS[i + 1].pct) {
+        lo = PM_COLOR_STOPS[i]; hi = PM_COLOR_STOPS[i + 1]; break;
+      }
+    }
+    const t = (p - lo.pct) / ((hi.pct - lo.pct) || 1);
+    const r = Math.round(lo.rgb[0] + (hi.rgb[0] - lo.rgb[0]) * t);
+    const g = Math.round(lo.rgb[1] + (hi.rgb[1] - lo.rgb[1]) * t);
+    const b = Math.round(lo.rgb[2] + (hi.rgb[2] - lo.rgb[2]) * t);
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+
   return {
     DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, UNITS, UNIT_LABEL,
     pad2, bangkokParts, dayKey, formatDayKeyBE, formatMonthKeyBE,
     formatDateTimeBE, formatClock, formatHours, formatDays, localInputToISO, isoToLocalInput,
+    DEFAULT_PM_TARGET_DAYS, pmProgressPercent, pmFillColor,
   };
 })();
 
@@ -337,12 +370,7 @@ const STORAGE_ENGINE = (() => {
 
   // Exact sum of running time since the unit's last reset (or all-time if
   // never reset), clipping any session that straddles the reset boundary.
-  async function getCumulativeSince(equipment) {
-    const [sessions, resetRec] = await Promise.all([
-      getSessionsByEquipment(equipment),
-      getReset(equipment),
-    ]);
-    const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
+  function sumSessionsSinceReset(sessions, resetAt) {
     let sum = 0;
     for (const s of sessions) {
       const start = new Date(s.startTime).getTime();
@@ -354,10 +382,33 @@ const STORAGE_ENGINE = (() => {
     return sum;
   }
 
+  async function getCumulativeSince(equipment) {
+    const [sessions, resetRec] = await Promise.all([
+      getSessionsByEquipment(equipment),
+      getReset(equipment),
+    ]);
+    const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
+    return sumSessionsSinceReset(sessions, resetAt);
+  }
+
+  // Fetches sessions + reset record once, returns both the exact cumulative
+  // seconds and the unit's configured PM-cycle target (defaulted) — avoids a
+  // redundant getReset() round-trip alongside getCumulativeSince().
+  async function getCumulativeAndTarget(equipment) {
+    const [sessions, resetRec] = await Promise.all([
+      getSessionsByEquipment(equipment),
+      getReset(equipment),
+    ]);
+    const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
+    const sec = sumSessionsSinceReset(sessions, resetAt);
+    const pmTargetDays = (resetRec && resetRec.pmTargetDays) || APP_CONFIG.DEFAULT_PM_TARGET_DAYS;
+    return { sec, pmTargetDays };
+  }
+
   return {
     open, addSession, updateSession, deleteSession, getSessionById,
     getSessionsByEquipment, getAllSessions, getOpenSessionsFor, startSessionAtomic,
-    getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData,
+    getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
     getDailyAggregates, getMonthlyAggregates, getCumulativeSince,
   };
 })();
@@ -377,6 +428,17 @@ const UI_RENDERER = (() => {
           <span class="status-pill stopped" id="statusPill-${unit}">
             <span class="status-dot"></span><span id="statusText-${unit}">หยุดทำงาน</span>
           </span>
+        </div>
+        <div class="tank-block">
+          <div class="tank-visual" id="tankVisual-${unit}">
+            <div class="tank-pipe tank-pipe-in"><span class="tank-pipe-flow"></span></div>
+            <div class="tank-shell">
+              <div class="tank-fill" id="tankFill-${unit}"></div>
+              <div class="tank-rim"></div>
+            </div>
+            <div class="tank-pipe tank-pipe-out"><span class="tank-pipe-flow"></span></div>
+          </div>
+          <div class="tank-progress-label">ความคืบหน้ารอบ PM: <span id="tankPct-${unit}">0%</span></div>
         </div>
         <div class="timer-row"><span class="timer-label">เวลาทำงาน (session ปัจจุบัน)</span></div>
         <div class="timer-value" id="timer-${unit}">00:00:00</div>
@@ -402,6 +464,8 @@ const UI_RENDERER = (() => {
     const text = document.getElementById(`statusText-${unit}`);
     const startBtn = document.getElementById(`startBtn-${unit}`);
     const stopBtn = document.getElementById(`stopBtn-${unit}`);
+    const tank = document.getElementById(`tankVisual-${unit}`);
+    if (tank) tank.classList.toggle('running', status === 'running');
     if (status === 'running') {
       pill.classList.add('running'); pill.classList.remove('stopped');
       text.textContent = 'กำลังทำงาน';
@@ -427,6 +491,17 @@ const UI_RENDERER = (() => {
     if (el) el.textContent = APP_CONFIG.formatHours(sec, 1) + ' ชม.';
     const daysEl = document.getElementById(`cumulativeDays-${unit}`);
     if (daysEl) daysEl.textContent = `(≈ ${APP_CONFIG.formatDays(sec, 1)} วัน)`;
+  }
+
+  function updateTankLevel(unit, pct) {
+    const clamped = Math.max(0, Math.min(100, pct));
+    const fillEl = document.getElementById(`tankFill-${unit}`);
+    if (fillEl) {
+      fillEl.style.height = clamped.toFixed(1) + '%';
+      fillEl.style.backgroundColor = APP_CONFIG.pmFillColor(clamped);
+    }
+    const pctEl = document.getElementById(`tankPct-${unit}`);
+    if (pctEl) pctEl.textContent = Math.round(clamped) + '%';
   }
 
   function toast(message, type) {
@@ -704,6 +779,25 @@ const UI_RENDERER = (() => {
         item.appendChild(noteEl);
       }
 
+      const targetWrap = document.createElement('div');
+      targetWrap.className = 'reset-pm-target';
+
+      const targetLabel = document.createElement('label');
+      targetLabel.setAttribute('for', `pmTarget-${unit}`);
+      targetLabel.textContent = 'เป้าหมาย PM ต่อรอบ (วัน)';
+      targetWrap.appendChild(targetLabel);
+
+      const targetInput = document.createElement('input');
+      targetInput.type = 'number';
+      targetInput.id = `pmTarget-${unit}`;
+      targetInput.min = '1'; targetInput.max = '365'; targetInput.step = '1';
+      targetInput.value = String((resetRec && resetRec.pmTargetDays) || APP_CONFIG.DEFAULT_PM_TARGET_DAYS);
+      targetInput.dataset.unit = unit;
+      targetInput.dataset.pmTarget = '1';
+      targetWrap.appendChild(targetInput);
+
+      item.appendChild(targetWrap);
+
       grid.appendChild(item);
     }
   }
@@ -714,7 +808,7 @@ const UI_RENDERER = (() => {
   }
 
   return {
-    initDashboard, setUnitStatus, updateTimer, updateCumulative, toast,
+    initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, toast,
     showModal, hideModal, setTheme, setActiveView, setReportModeButtons,
     renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo,
     setTrendRangeButtons,
@@ -818,6 +912,8 @@ const APP_CORE = (() => {
 
     document.querySelector('#historyTable tbody').addEventListener('click', handleHistoryTableClick);
 
+    document.getElementById('resetInfoGrid').addEventListener('change', handlePmTargetChange);
+
     document.getElementById('reportModeDailyBtn').addEventListener('click', () => setReportMode('daily'));
     document.getElementById('reportModeMonthlyBtn').addEventListener('click', () => setReportMode('monthly'));
     document.getElementById('reportRangeSelect').addEventListener('change', refreshReport);
@@ -906,6 +1002,7 @@ const APP_CORE = (() => {
         await STORAGE_ENGINE.saveReset({
           equipment: unit,
           lastResetAt: now,
+          pmTargetDays: existing && existing.pmTargetDays,
           resetHistory: [...((existing && existing.resetHistory) || []), {
             ts: now, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
           }],
@@ -916,12 +1013,37 @@ const APP_CORE = (() => {
     });
   }
 
+  async function handlePmTargetChange(evt) {
+    const input = evt.target.closest('input[data-pm-target]');
+    if (!input) return;
+    const unit = input.dataset.unit;
+    let days = parseInt(input.value, 10);
+    if (!Number.isFinite(days) || days < 1) days = APP_CONFIG.DEFAULT_PM_TARGET_DAYS;
+    days = Math.min(365, Math.max(1, days));
+    input.value = days;
+    try {
+      const existing = await STORAGE_ENGINE.getReset(unit);
+      await STORAGE_ENGINE.saveReset({
+        equipment: unit,
+        lastResetAt: (existing && existing.lastResetAt) || null,
+        resetHistory: (existing && existing.resetHistory) || [],
+        pmTargetDays: days,
+      });
+      await refreshCumulativeCards();
+      UI_RENDERER.toast(`บันทึกเป้าหมาย PM ของ PM-500${unit} เรียบร้อยแล้ว (${days} วัน)`);
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handlePmTargetChange', err);
+      UI_RENDERER.toast('บันทึกเป้าหมาย PM ไม่สำเร็จ: ' + err.message, 'error');
+    }
+  }
+
   /* ---- Cumulative / report refresh ---- */
 
   async function refreshCumulativeCards() {
     for (const unit of APP_CONFIG.UNITS) {
-      const sec = await STORAGE_ENGINE.getCumulativeSince(unit);
+      const { sec, pmTargetDays } = await STORAGE_ENGINE.getCumulativeAndTarget(unit);
       UI_RENDERER.updateCumulative(unit, sec);
+      UI_RENDERER.updateTankLevel(unit, APP_CONFIG.pmProgressPercent(sec, pmTargetDays));
     }
   }
 

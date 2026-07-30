@@ -149,6 +149,48 @@
   .status-pill.stopped { color: var(--text-muted); }
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(22,163,74,0.35);} 70%{box-shadow:0 0 0 8px rgba(22,163,74,0);} 100%{box-shadow:0 0 0 0 rgba(22,163,74,0);} }
 
+  .tank-block { display:flex; flex-direction:column; align-items:center; gap:6px; }
+  .tank-visual { display:flex; flex-direction:column; align-items:center; }
+  .tank-pipe {
+    width: 20px; height: 18px;
+    background: var(--bg-elevated);
+    border-left: 2px solid var(--glass-border);
+    border-right: 2px solid var(--glass-border);
+    position: relative;
+    overflow: hidden;
+  }
+  .tank-pipe-in { border-top-left-radius:4px; border-top-right-radius:4px; }
+  .tank-pipe-out { border-bottom-left-radius:4px; border-bottom-right-radius:4px; }
+  .tank-pipe-flow {
+    position: absolute; top:-16px; left:-4px; right:-4px; bottom:-16px;
+    background-image: repeating-linear-gradient(
+      to bottom, var(--accent) 0, var(--accent) 6px, transparent 6px, transparent 16px
+    );
+    opacity: 0.5;
+  }
+  .tank-visual.running .tank-pipe-flow { animation: tank-pipe-flow 0.8s linear infinite; }
+  @keyframes tank-pipe-flow { from { background-position: 0 0; } to { background-position: 0 16px; } }
+  .tank-shell {
+    position: relative;
+    width: 112px; height: 128px;
+    border: 2px solid var(--glass-border);
+    border-radius: 56px / 18px;
+    background: var(--bg-elevated);
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.18), var(--shadow);
+    overflow: hidden;
+  }
+  .tank-fill {
+    position: absolute; left:0; right:0; bottom:0; height: 0%;
+    background-color: var(--green);
+    transition: height 0.6s ease, background-color 0.6s ease;
+  }
+  .tank-rim {
+    position: absolute; top:0; left:0; right:0; height:18px; border-radius:50%;
+    background: linear-gradient(to bottom, rgba(255,255,255,0.35), rgba(255,255,255,0));
+    pointer-events: none;
+  }
+  .tank-progress-label { font-size: 0.8rem; color: var(--text-muted); }
+
   .timer-row { display:flex; align-items:baseline; gap:8px; }
   .timer-label { font-size:0.8rem; color: var(--text-muted); }
   .timer-value { font-size: 2.1rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; }
@@ -183,7 +225,7 @@
   .section-title { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom: 14px; }
   .section-title h2 { font-size: 1.05rem; margin: 0; }
   .section-controls { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
-  select, input[type="datetime-local"], input[type="text"] {
+  select, input[type="datetime-local"], input[type="text"], input[type="number"] {
     font-family: inherit; font-size: 0.9rem; padding: 8px 10px; border-radius: var(--radius-sm);
     border: 1px solid var(--glass-border); background: var(--bg-elevated); color: var(--text);
   }
@@ -205,6 +247,9 @@
   .reset-info-name { font-weight:700; font-size:0.95rem; }
   .reset-info-date { font-size:0.95rem; color: var(--accent-strong); font-weight:600; }
   .reset-info-note { font-size:0.82rem; color: var(--text-muted); }
+  .reset-pm-target { display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .reset-pm-target label { font-size:0.78rem; color:var(--text-muted); }
+  .reset-pm-target input[type="number"] { width:64px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
   thead th { text-align:left; padding: 8px 10px; color: var(--text-muted); font-weight:600; border-bottom: 1px solid var(--glass-border); white-space:nowrap; }
