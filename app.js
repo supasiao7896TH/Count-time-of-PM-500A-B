@@ -614,6 +614,7 @@ const UI_RENDERER = (() => {
     const maxHours = niceCeil(Math.max(1, ...rows.map((r) => Math.max(r.A, r.B) / 3600)));
 
     const svg = document.createElementNS(svgNS, 'svg');
+    svg.setAttribute('id', 'trendChart');
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     svg.setAttribute('role', 'img');
     svg.setAttribute('aria-label', 'กราฟแนวโน้มชั่วโมงทำงานรายวัน เปรียบเทียบ PM-500A กับ PM-500B');
