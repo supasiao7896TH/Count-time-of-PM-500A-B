@@ -150,31 +150,24 @@
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(22,163,74,0.35);} 70%{box-shadow:0 0 0 8px rgba(22,163,74,0);} 100%{box-shadow:0 0 0 0 rgba(22,163,74,0);} }
 
   .tank-block { display:flex; flex-direction:column; align-items:center; gap:6px; }
-  .tank-visual { display:flex; flex-direction:column; align-items:center; }
-  .tank-pipe {
-    width: 20px; height: 18px;
-    background: var(--bg-elevated);
-    border-left: 2px solid var(--glass-border);
-    border-right: 2px solid var(--glass-border);
-    position: relative;
-    overflow: hidden;
-  }
-  .tank-pipe-in { border-top-left-radius:4px; border-top-right-radius:4px; }
-  .tank-pipe-out { border-bottom-left-radius:4px; border-bottom-right-radius:4px; }
-  .tank-pipe-flow {
-    position: absolute; top:-16px; left:-4px; right:-4px; bottom:-16px;
-    background-image: repeating-linear-gradient(
-      to bottom, var(--accent) 0, var(--accent) 6px, transparent 6px, transparent 16px
-    );
-    opacity: 0.5;
-  }
-  .tank-visual.running .tank-pipe-flow { animation: tank-pipe-flow 0.8s linear infinite; }
-  @keyframes tank-pipe-flow { from { background-position: 0 0; } to { background-position: 0 16px; } }
+  .tank-visual { display:flex; flex-direction:column; align-items:center; padding-top: 22px; padding-bottom: 38px; }
+  .tank-pipe-wrap { position: relative; width: 20px; height: 36px; }
+  .tank-pipe-svg { position: absolute; overflow: visible; }
+  .tank-pipe-svg-in { left: -56px; top: -8px; width: 76px; height: 44px; }
+  .tank-pipe-svg-out { left: 0; top: 0; width: 76px; height: 44px; }
+  .tank-pipe-wall { fill: none; stroke: var(--glass-border); stroke-width: 26; stroke-linecap: round; stroke-linejoin: round; }
+  .tank-pipe-fill { fill: none; stroke: var(--bg-elevated); stroke-width: 21; stroke-linecap: round; stroke-linejoin: round; }
+  .tank-pipe-flow-path { fill: none; stroke: var(--accent); stroke-width: 8; stroke-linecap: round; stroke-dasharray: 1 23; opacity: 0.6; }
+  .tank-visual.running .tank-pipe-flow-path { animation: tank-pipe-flow-dash 1s linear infinite; }
+  @keyframes tank-pipe-flow-dash { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -24; } }
+  .tank-pipe-label-in { position:absolute; left:-56px; top:-34px; width:56px; text-align:center; }
+  .tank-pipe-label-out { position:absolute; left:100%; bottom:-34px; width:56px; text-align:center; }
+  .tank-flow-through-svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
   .tank-shell {
     position: relative;
-    width: 112px; height: 128px;
-    border: 2px solid var(--glass-border);
-    border-radius: 56px / 18px;
+    width: 112px; height: 150px;
+    border: 2px solid var(--accent-strong);
+    border-radius: 56px / 44px;
     background: var(--bg-elevated);
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.18), var(--shadow);
     overflow: hidden;
@@ -189,7 +182,21 @@
     background: linear-gradient(to bottom, rgba(255,255,255,0.35), rgba(255,255,255,0));
     pointer-events: none;
   }
-  .tank-progress-label { font-size: 0.8rem; color: var(--text-muted); }
+  .tank-panel-lines {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(var(--accent-strong), var(--accent-strong)),
+      linear-gradient(var(--accent-strong), var(--accent-strong)),
+      linear-gradient(var(--accent-strong), var(--accent-strong)),
+      linear-gradient(var(--accent-strong), var(--accent-strong)),
+      linear-gradient(var(--accent-strong), var(--accent-strong));
+    background-position: 25% 44px, 50% 44px, 75% 44px, 0 44px, 0 106px;
+    background-size: 1px 62px, 1px 62px, 1px 62px, 100% 1px, 100% 1px;
+    background-repeat: no-repeat;
+    opacity: 0.55;
+  }
+  .tank-progress-label { font-size: 0.95rem; color: var(--text-muted); }
+  .tank-pipe-label { font-size: 0.82rem; color: var(--text-muted); letter-spacing: 0.02em; }
 
   .timer-row { display:flex; align-items:baseline; gap:8px; }
   .timer-label { font-size:0.8rem; color: var(--text-muted); }
@@ -236,8 +243,10 @@
   .chart-legend-swatch { width:10px; height:10px; border-radius:3px; flex-shrink:0; }
   .chart-empty { text-align:center; padding: 40px 10px; color: var(--text-muted); font-size:0.9rem; }
   #trendChart { width:100%; height:auto; display:block; }
-  #trendChart .bar-a { fill: var(--chart-a); }
-  #trendChart .bar-b { fill: var(--chart-b); }
+  #trendChart .line-a { fill:none; stroke: var(--chart-a); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  #trendChart .line-b { fill:none; stroke: var(--chart-b); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  #trendChart .dot-a { fill: var(--chart-a); }
+  #trendChart .dot-b { fill: var(--chart-b); }
   #trendChart .chart-gridline { stroke: var(--chart-grid); stroke-width:1; }
   #trendChart .chart-axis-text { fill: var(--chart-axis); font-size: 10px; }
 
@@ -359,11 +368,7 @@
 
     <div class="card">
       <div class="section-title">
-        <h2>📈 แนวโน้มชั่วโมงทำงานรายวัน</h2>
-        <div class="section-controls">
-          <button type="button" class="btn-ghost btn" data-trend-range="7" id="trendRange7Btn">7 วัน</button>
-          <button type="button" class="btn-ghost btn" data-trend-range="14" id="trendRange14Btn">14 วัน</button>
-        </div>
+        <h2>📈 แนวโน้มชั่วโมงสะสม (ตั้งแต่รีเซ็ตล่าสุด)</h2>
       </div>
       <div class="chart-legend" style="margin-bottom:10px;">
         <span class="chart-legend-item"><span class="chart-legend-swatch" style="background:var(--chart-a);"></span>PM-500A</span>
@@ -404,6 +409,7 @@
           <button type="button" class="btn btn-primary" id="exportSessionCsvBtn">Export Session Log</button>
         </div>
       </div>
+      <p class="caption" id="reportRangeCaption" style="margin-top:0; margin-bottom:10px;"></p>
       <div class="table-scroll">
         <table id="reportTable">
           <thead><tr><th>ช่วงเวลา</th><th>PM-500A (ชม.)</th><th>PM-500B (ชม.)</th><th>รวม (ชม.)</th><th>จำนวน Session</th></tr></thead>
