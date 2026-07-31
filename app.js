@@ -14,9 +14,10 @@ const APP_CONFIG = (() => {
   'use strict';
 
   const DB_NAME = 'pm500_tracker_db';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_SESSIONS = 'runtime_sessions';
   const STORE_RESETS = 'unit_resets';
+  const STORE_FILTER_CHANGES = 'filter_changes';
 
   const BE_OFFSET = 543;
   const BKK_OFFSET_MS = 7 * 60 * 60 * 1000; // Asia/Bangkok, fixed UTC+7, no DST
@@ -78,6 +79,10 @@ const APP_CONFIG = (() => {
     return (Math.max(0, totalSeconds || 0) / 86400).toFixed(decimals == null ? 1 : decimals);
   }
 
+  function formatBaht(amount) {
+    return (Math.max(0, amount || 0)).toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' บาท';
+  }
+
   // <input type=datetime-local> value <-> ISO 8601 UTC string.
   // The datetime-local value has no timezone info (just wall-clock numbers).
   // We always interpret/render those numbers as Asia/Bangkok (fixed UTC+7),
@@ -131,9 +136,9 @@ const APP_CONFIG = (() => {
   }
 
   return {
-    DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, UNITS, UNIT_LABEL,
+    DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, STORE_FILTER_CHANGES, UNITS, UNIT_LABEL,
     pad2, bangkokParts, dayKey, formatDayKeyBE, formatMonthKeyBE,
-    formatDateTimeBE, formatClock, formatHours, formatDays, localInputToISO, isoToLocalInput,
+    formatDateTimeBE, formatClock, formatHours, formatDays, formatBaht, localInputToISO, isoToLocalInput,
     DEFAULT_PM_TARGET_DAYS, pmProgressPercent, pmFillColor,
   };
 })();
@@ -166,6 +171,7 @@ const STATE_STORE = (() => {
     theme: localStorage.getItem('pm500_theme') || 'auto',
     activeView: localStorage.getItem('pm500_view') || 'dashboard',
     reportMode: 'daily',
+    reportUnit: 'A',
   };
   const listeners = {};
 
@@ -203,6 +209,10 @@ const STORAGE_ENGINE = (() => {
         }
         if (!db.objectStoreNames.contains(APP_CONFIG.STORE_RESETS)) {
           db.createObjectStore(APP_CONFIG.STORE_RESETS, { keyPath: 'equipment' });
+        }
+        if (!db.objectStoreNames.contains(APP_CONFIG.STORE_FILTER_CHANGES)) {
+          const store = db.createObjectStore(APP_CONFIG.STORE_FILTER_CHANGES, { keyPath: 'id', autoIncrement: true });
+          store.createIndex('by_equipment', 'equipment', { unique: false });
         }
       };
       req.onsuccess = (e) => resolve(e.target.result);
@@ -298,12 +308,50 @@ const STORAGE_ENGINE = (() => {
     return record;
   }
 
-  // Wipes both stores entirely — used only by the "clear test data" dev control.
+  async function addFilterChange(record) {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
+    const id = await reqToPromise(store.add(record));
+    return { ...record, id };
+  }
+
+  async function updateFilterChange(id, patch) {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
+    const existing = await reqToPromise(store.get(id));
+    if (!existing) throw new Error('filter change not found: ' + id);
+    const updated = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    await reqToPromise(store.put(updated));
+    return updated;
+  }
+
+  async function deleteFilterChange(id) {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
+    await reqToPromise(store.delete(id));
+  }
+
+  async function getFilterChangeById(id) {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readonly');
+    return reqToPromise(store.get(id));
+  }
+
+  async function getFilterChangesByEquipment(equipment) {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readonly');
+    const idx = store.index('by_equipment');
+    return reqToPromise(idx.getAll(equipment));
+  }
+
+  async function getAllFilterChanges() {
+    const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readonly');
+    return reqToPromise(store.getAll());
+  }
+
+  // Wipes all stores entirely — used only by the "clear test data" dev control.
   async function clearAllData() {
     const sessionsStore = await tx(APP_CONFIG.STORE_SESSIONS, 'readwrite');
     await reqToPromise(sessionsStore.clear());
     const resetsStore = await tx(APP_CONFIG.STORE_RESETS, 'readwrite');
     await reqToPromise(resetsStore.clear());
+    const filterChangesStore = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
+    await reqToPromise(filterChangesStore.clear());
   }
 
   function effectiveEnd(session) {
@@ -342,15 +390,22 @@ const STORAGE_ENGINE = (() => {
     const buckets = {};
     for (const s of sessions) {
       const key = APP_CONFIG.dayKey(s.startTime);
-      if (!buckets[key]) buckets[key] = { A: 0, B: 0, countA: 0, countB: 0, hasOpenSession: false, latestEndDayKey: null };
+      if (!buckets[key]) {
+        buckets[key] = {
+          A: 0, B: 0, countA: 0, countB: 0,
+          hasOpenSessionA: false, hasOpenSessionB: false,
+          latestEndDayKeyA: null, latestEndDayKeyB: null,
+        };
+      }
       buckets[key][s.equipment] += effectiveDurationSec(s);
       buckets[key]['count' + s.equipment] += 1;
       if (!s.endTime) {
-        buckets[key].hasOpenSession = true;
+        buckets[key]['hasOpenSession' + s.equipment] = true;
       } else {
         const endKey = APP_CONFIG.dayKey(s.endTime);
-        if (buckets[key].latestEndDayKey == null || endKey > buckets[key].latestEndDayKey) {
-          buckets[key].latestEndDayKey = endKey;
+        const latestField = 'latestEndDayKey' + s.equipment;
+        if (buckets[key][latestField] == null || endKey > buckets[key][latestField]) {
+          buckets[key][latestField] = endKey;
         }
       }
     }
@@ -451,6 +506,8 @@ const STORAGE_ENGINE = (() => {
     getSessionsByEquipment, getAllSessions, getOpenSessionsFor, startSessionAtomic,
     getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
     getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCycleUsageTrend,
+    addFilterChange, updateFilterChange, deleteFilterChange, getFilterChangeById,
+    getFilterChangesByEquipment, getAllFilterChanges,
   };
 })();
 
@@ -514,6 +571,10 @@ const UI_RENDERER = (() => {
           <button type="button" class="btn btn-start" id="startBtn-${unit}">▶ เริ่มทำงาน</button>
           <button type="button" class="btn btn-stop" id="stopBtn-${unit}" style="display:none;">⏹ หยุดทำงาน</button>
           <button type="button" class="btn btn-ghost" id="resetBtn-${unit}" title="รีเซ็ตชั่วโมงสะสม">รีเซ็ต</button>
+        </div>
+        <div class="filter-row">
+          <span class="filter-count-label">เปลี่ยน Filter แล้ว <b id="filterCount-${unit}">0</b> ครั้ง</span>
+          <button type="button" class="btn-ghost btn" id="filterChangeBtn-${unit}">🧰 บันทึกเปลี่ยน Filter</button>
         </div>
       </div>`;
   }
@@ -604,23 +665,29 @@ const UI_RENDERER = (() => {
     document.getElementById('reportModeMonthlyBtn').classList.toggle('active', mode === 'monthly');
   }
 
+  function setReportUnitButtons(unit) {
+    document.getElementById('reportUnitABtn').classList.toggle('active', unit === 'A');
+    document.getElementById('reportUnitBBtn').classList.toggle('active', unit === 'B');
+  }
+
   function setReportRangeCaption(text) {
     const el = document.getElementById('reportRangeCaption');
     if (el) el.textContent = text;
   }
 
-  function reportUntilCellText(row) {
-    if (row.hasOpenSession) return 'ถึงปัจจุบัน';
-    if (row.latestEndDayKey && row.latestEndDayKey !== row.key) return `ถึง ${APP_CONFIG.formatDayKeyBE(row.latestEndDayKey)}`;
+  function reportUntilCellText(row, unit) {
+    if (row['hasOpenSession' + unit]) return 'ถึงปัจจุบัน';
+    const latestEndDayKey = row['latestEndDayKey' + unit];
+    if (latestEndDayKey && latestEndDayKey !== row.key) return `ถึง ${APP_CONFIG.formatDayKeyBE(latestEndDayKey)}`;
     return '—';
   }
 
-  function renderReportTable(rows, mode) {
+  function renderReportTable(rows, mode, unit) {
     const thead = document.querySelector('#reportTable thead tr');
     thead.innerHTML = '';
     const headers = mode === 'daily'
-      ? ['วันที่', 'ถึงวันที่', 'PM-500A (ชม.)', 'PM-500B (ชม.)', 'รวม (ชม.)', 'รวม (วัน)', 'จำนวน Session']
-      : ['เดือน', 'PM-500A (ชม.)', 'PM-500B (ชม.)', 'รวม (ชม.)', 'รวม (วัน)', 'จำนวน Session'];
+      ? ['วันที่', 'ถึงวันที่', 'ชั่วโมง (ชม.)', 'สะสม (วัน)', 'จำนวน Session']
+      : ['เดือน', 'ชั่วโมง (ชม.)', 'สะสม (วัน)', 'จำนวน Session'];
     for (const h of headers) {
       const th = document.createElement('th');
       th.textContent = h;
@@ -638,10 +705,9 @@ const UI_RENDERER = (() => {
     }
     for (const row of rows) {
       const tr = document.createElement('tr');
-      const total = row.A + row.B;
       const cells = mode === 'daily'
-        ? [row.label, reportUntilCellText(row), APP_CONFIG.formatHours(row.A, 1), APP_CONFIG.formatHours(row.B, 1), APP_CONFIG.formatHours(total, 1), APP_CONFIG.formatDays(total, 1), String(row.countA + row.countB)]
-        : [row.label, APP_CONFIG.formatHours(row.A, 1), APP_CONFIG.formatHours(row.B, 1), APP_CONFIG.formatHours(total, 1), APP_CONFIG.formatDays(total, 1), String(row.countA + row.countB)];
+        ? [row.label, reportUntilCellText(row, unit), APP_CONFIG.formatHours(row[unit], 1), APP_CONFIG.formatDays(row[unit], 1), String(row['count' + unit])]
+        : [row.label, APP_CONFIG.formatHours(row[unit], 1), APP_CONFIG.formatDays(row[unit], 1), String(row['count' + unit])];
       for (const c of cells) {
         const td = document.createElement('td');
         td.textContent = c;
@@ -875,10 +941,145 @@ const UI_RENDERER = (() => {
     }
   }
 
+  function renderResetHistoryTable(records) {
+    const tbody = document.querySelector('#resetHistoryTable tbody');
+    tbody.innerHTML = '';
+    if (!records.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 7; td.className = 'empty-state'; td.textContent = 'ยังไม่มีประวัติการรีเซ็ต';
+      tr.appendChild(td); tbody.appendChild(tr);
+      return;
+    }
+    for (const r of records) {
+      const tr = document.createElement('tr');
+      const cells = [
+        APP_CONFIG.UNIT_LABEL[r.unit],
+        APP_CONFIG.formatDateTimeBE(r.ts),
+        r.hoursAtReset.toFixed(2),
+        r.pd2500Pv != null ? String(r.pd2500Pv) : '—',
+        r.pe501OpenCount != null ? String(r.pe501OpenCount) : '—',
+        r.lcv2502OpenCount != null ? String(r.lcv2502OpenCount) : '—',
+        r.note || '',
+      ];
+      for (const c of cells) {
+        const td = document.createElement('td');
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+  }
+
+  function updateFilterCount(unit, count) {
+    const el = document.getElementById(`filterCount-${unit}`);
+    if (el) el.textContent = String(count);
+  }
+
+  function renderFilterSummary(units) {
+    const grid = document.getElementById('filterSummaryGrid');
+    grid.innerHTML = '';
+    let totalCount = 0, totalCost = 0;
+    for (const { unit, count, totalCost: unitCost, lastChangedAt } of units) {
+      totalCount += count;
+      totalCost += unitCost;
+
+      const item = document.createElement('div');
+      item.className = 'reset-info-item';
+
+      const name = document.createElement('span');
+      name.className = 'reset-info-name';
+      name.textContent = APP_CONFIG.UNIT_LABEL[unit];
+      item.appendChild(name);
+
+      const countEl = document.createElement('span');
+      countEl.className = 'reset-info-date';
+      countEl.textContent = `เปลี่ยนแล้ว ${count} ครั้ง`;
+      item.appendChild(countEl);
+
+      const costEl = document.createElement('span');
+      costEl.className = 'reset-info-note';
+      costEl.textContent = `ค่าใช้จ่ายรวม: ${APP_CONFIG.formatBaht(unitCost)}`;
+      item.appendChild(costEl);
+
+      const lastEl = document.createElement('span');
+      lastEl.className = 'reset-info-note';
+      lastEl.textContent = lastChangedAt ? `เปลี่ยนล่าสุด: ${APP_CONFIG.formatDayKeyBE(APP_CONFIG.dayKey(lastChangedAt))}` : 'ยังไม่เคยเปลี่ยน';
+      item.appendChild(lastEl);
+
+      grid.appendChild(item);
+    }
+
+    const totalItem = document.createElement('div');
+    totalItem.className = 'reset-info-item';
+    totalItem.style.gridColumn = '1 / -1';
+    const totalName = document.createElement('span');
+    totalName.className = 'reset-info-name';
+    totalName.textContent = 'รวมทั้งสองเครื่อง';
+    totalItem.appendChild(totalName);
+    const totalCountEl = document.createElement('span');
+    totalCountEl.className = 'reset-info-date';
+    totalCountEl.textContent = `เปลี่ยนแล้ว ${totalCount} ครั้ง`;
+    totalItem.appendChild(totalCountEl);
+    const totalCostEl = document.createElement('span');
+    totalCostEl.className = 'reset-info-note';
+    totalCostEl.textContent = `ค่าใช้จ่ายรวม: ${APP_CONFIG.formatBaht(totalCost)}`;
+    totalItem.appendChild(totalCostEl);
+    grid.appendChild(totalItem);
+  }
+
+  function renderFilterHistoryTable(records) {
+    const tbody = document.querySelector('#filterHistoryTable tbody');
+    tbody.innerHTML = '';
+    if (!records.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5; td.className = 'empty-state'; td.textContent = 'ยังไม่มีประวัติการเปลี่ยน Filter';
+      tr.appendChild(td); tbody.appendChild(tr);
+      return;
+    }
+    for (const r of records) {
+      const tr = document.createElement('tr');
+
+      const tdUnit = document.createElement('td');
+      tdUnit.textContent = APP_CONFIG.UNIT_LABEL[r.equipment];
+      tr.appendChild(tdUnit);
+
+      const tdDate = document.createElement('td');
+      tdDate.textContent = APP_CONFIG.formatDayKeyBE(APP_CONFIG.dayKey(r.changedAt));
+      tr.appendChild(tdDate);
+
+      const tdCost = document.createElement('td');
+      tdCost.textContent = r.cost != null ? APP_CONFIG.formatBaht(r.cost) : '—';
+      tr.appendChild(tdCost);
+
+      const tdNote = document.createElement('td');
+      tdNote.textContent = r.note || '';
+      tr.appendChild(tdNote);
+
+      const tdActions = document.createElement('td');
+      const wrap = document.createElement('div');
+      wrap.className = 'row-actions';
+      const editBtn = document.createElement('button');
+      editBtn.type = 'button'; editBtn.textContent = 'แก้ไข';
+      editBtn.dataset.action = 'edit'; editBtn.dataset.id = r.id;
+      wrap.appendChild(editBtn);
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button'; delBtn.textContent = 'ลบ';
+      delBtn.dataset.action = 'delete'; delBtn.dataset.id = r.id;
+      wrap.appendChild(delBtn);
+      tdActions.appendChild(wrap);
+      tr.appendChild(tdActions);
+
+      tbody.appendChild(tr);
+    }
+  }
+
   return {
     initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, toast,
-    showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportRangeCaption,
-    renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo,
+    showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportUnitButtons, setReportRangeCaption,
+    renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo, renderResetHistoryTable,
+    updateFilterCount, renderFilterSummary, renderFilterHistoryTable,
   };
 })();
 
@@ -889,6 +1090,8 @@ const APP_CORE = (() => {
   'use strict';
 
   let editingSessionId = null;
+  let editingFilterChangeId = null;
+  let filterChangeUnit = null;
   let pendingConfirmAction = null;
 
   async function init() {
@@ -902,7 +1105,8 @@ const APP_CORE = (() => {
       applyStoredTheme();
       UI_RENDERER.setActiveView(STATE_STORE.get('activeView'));
       UI_RENDERER.setReportModeButtons(STATE_STORE.get('reportMode'));
-      await Promise.all([refreshCumulativeCards(), refreshReport(), refreshHistory(), refreshTrendChart(), refreshResetInfo()]);
+      UI_RENDERER.setReportUnitButtons(STATE_STORE.get('reportUnit'));
+      await Promise.all([refreshCumulativeCards(), refreshReport(), refreshHistory(), refreshTrendChart(), refreshResetInfo(), refreshResetHistory(), refreshFilterCounts(), refreshFilterChanges()]);
       startTicker();
       registerServiceWorker();
     } catch (err) {
@@ -963,7 +1167,8 @@ const APP_CORE = (() => {
     for (const unit of APP_CONFIG.UNITS) {
       document.getElementById(`startBtn-${unit}`).addEventListener('click', () => handleStart(unit));
       document.getElementById(`stopBtn-${unit}`).addEventListener('click', () => handleStop(unit));
-      document.getElementById(`resetBtn-${unit}`).addEventListener('click', () => handleResetRequest(unit));
+      document.getElementById(`resetBtn-${unit}`).addEventListener('click', () => openResetModal(unit));
+      document.getElementById(`filterChangeBtn-${unit}`).addEventListener('click', () => openAddFilterChangeModal(unit));
     }
 
     document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
@@ -972,6 +1177,13 @@ const APP_CORE = (() => {
     document.getElementById('clearAllDataBtn').addEventListener('click', handleClearAllDataRequest);
     document.getElementById('sessionModalCancelBtn').addEventListener('click', closeSessionModal);
     document.getElementById('sessionForm').addEventListener('submit', handleSessionFormSubmit);
+
+    document.getElementById('resetModalCancelBtn').addEventListener('click', closeResetModal);
+    document.getElementById('resetForm').addEventListener('submit', handleResetFormSubmit);
+
+    document.getElementById('filterModalCancelBtn').addEventListener('click', closeFilterModal);
+    document.getElementById('filterForm').addEventListener('submit', handleFilterFormSubmit);
+    document.querySelector('#filterHistoryTable tbody').addEventListener('click', handleFilterHistoryTableClick);
 
     document.getElementById('confirmModalCancelBtn').addEventListener('click', closeConfirmModal);
     document.getElementById('confirmModalOkBtn').addEventListener('click', handleConfirmOk);
@@ -982,6 +1194,8 @@ const APP_CORE = (() => {
 
     document.getElementById('reportModeDailyBtn').addEventListener('click', () => setReportMode('daily'));
     document.getElementById('reportModeMonthlyBtn').addEventListener('click', () => setReportMode('monthly'));
+    document.getElementById('reportUnitABtn').addEventListener('click', () => setReportUnit('A'));
+    document.getElementById('reportUnitBBtn').addEventListener('click', () => setReportUnit('B'));
     document.getElementById('reportRangeSelect').addEventListener('change', refreshReport);
 
     document.getElementById('exportSessionCsvBtn').addEventListener('click', exportSessionCsv);
@@ -1053,27 +1267,72 @@ const APP_CORE = (() => {
 
   /* ---- Reset cumulative hours ---- */
 
-  function handleResetRequest(unit) {
-    openConfirmModal({
-      title: `รีเซ็ตชั่วโมงสะสม PM-500${unit}`,
-      body: `การรีเซ็ตจะทำให้ตัวเลข "ชั่วโมงสะสม" ของ PM-500${unit} เริ่มนับใหม่จาก 0 ตั้งแต่ตอนนี้ ประวัติ Session ทั้งหมดจะยังคงถูกเก็บไว้ครบถ้วนและตรวจสอบย้อนหลังได้เสมอ กรุณาระบุหมายเหตุ`,
-      requireNote: true,
-      onConfirm: async (note) => {
-        const cumulativeSec = await STORAGE_ENGINE.getCumulativeSince(unit);
-        const now = new Date().toISOString();
-        const existing = await STORAGE_ENGINE.getReset(unit);
-        await STORAGE_ENGINE.saveReset({
-          equipment: unit,
-          lastResetAt: now,
-          pmTargetDays: existing && existing.pmTargetDays,
-          resetHistory: [...((existing && existing.resetHistory) || []), {
-            ts: now, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
-          }],
-        });
-        await Promise.all([refreshCumulativeCards(), refreshResetInfo(), refreshTrendChart()]);
-        UI_RENDERER.toast(`รีเซ็ตชั่วโมงสะสมของ PM-500${unit} เรียบร้อยแล้ว`);
-      },
-    });
+  let resetModalUnit = null;
+
+  function openResetModal(unit) {
+    resetModalUnit = unit;
+    document.getElementById('resetModalTitle').textContent = `รีเซ็ตชั่วโมงสะสม PM-500${unit}`;
+    document.getElementById('resetModalBody').textContent =
+      `การรีเซ็ตจะทำให้ตัวเลข "ชั่วโมงสะสม" ของ PM-500${unit} เริ่มนับใหม่จาก 0 ตั้งแต่ตอนนี้ ประวัติ Session ทั้งหมดจะยังคงถูกเก็บไว้ครบถ้วนและตรวจสอบย้อนหลังได้เสมอ กรุณาระบุค่าต่อไปนี้`;
+    document.getElementById('resetForm').reset();
+    document.getElementById('resetFormError').textContent = '';
+    UI_RENDERER.showModal('resetModalOverlay');
+  }
+
+  function closeResetModal() {
+    UI_RENDERER.hideModal('resetModalOverlay');
+    resetModalUnit = null;
+  }
+
+  async function handleResetFormSubmit(evt) {
+    evt.preventDefault();
+    const errorEl = document.getElementById('resetFormError');
+    errorEl.textContent = '';
+
+    const pd2500Val = document.getElementById('fResetPd2500').value;
+    const pe501Val = document.getElementById('fResetPe501').value;
+    const lcv2502Val = document.getElementById('fResetLcv2502').value;
+    const note = document.getElementById('fResetNote').value.trim();
+
+    if (pd2500Val === '') { errorEl.textContent = 'กรุณาระบุค่า PD-2500.PV'; return; }
+    const pd2500Pv = Number(pd2500Val);
+    if (!Number.isFinite(pd2500Pv) || pd2500Pv < 0) { errorEl.textContent = 'ค่า PD-2500.PV ต้องเป็นตัวเลขไม่ติดลบ'; return; }
+
+    if (pe501Val === '') { errorEl.textContent = 'กรุณาระบุจำนวนรอบที่เปิด B/V bypass PE-501'; return; }
+    const pe501OpenCount = Number(pe501Val);
+    if (!Number.isInteger(pe501OpenCount) || pe501OpenCount < 0) { errorEl.textContent = 'B/V bypass PE-501 ต้องเป็นจำนวนเต็มไม่ติดลบ'; return; }
+
+    if (lcv2502Val === '') { errorEl.textContent = 'กรุณาระบุจำนวนรอบที่เปิด B/V bypass LCV-2502'; return; }
+    const lcv2502OpenCount = Number(lcv2502Val);
+    if (!Number.isInteger(lcv2502OpenCount) || lcv2502OpenCount < 0) { errorEl.textContent = 'B/V bypass LCV-2502 ต้องเป็นจำนวนเต็มไม่ติดลบ'; return; }
+
+    if (!note) { errorEl.textContent = 'กรุณาระบุหมายเหตุ'; return; }
+
+    const unit = resetModalUnit;
+    const saveBtn = document.getElementById('resetModalSaveBtn');
+    saveBtn.disabled = true;
+    try {
+      const cumulativeSec = await STORAGE_ENGINE.getCumulativeSince(unit);
+      const now = new Date().toISOString();
+      const existing = await STORAGE_ENGINE.getReset(unit);
+      await STORAGE_ENGINE.saveReset({
+        equipment: unit,
+        lastResetAt: now,
+        pmTargetDays: existing && existing.pmTargetDays,
+        resetHistory: [...((existing && existing.resetHistory) || []), {
+          ts: now, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
+          pd2500Pv, pe501OpenCount, lcv2502OpenCount,
+        }],
+      });
+      closeResetModal();
+      await Promise.all([refreshCumulativeCards(), refreshResetInfo(), refreshResetHistory(), refreshTrendChart()]);
+      UI_RENDERER.toast(`รีเซ็ตชั่วโมงสะสมของ PM-500${unit} เรียบร้อยแล้ว`);
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleResetFormSubmit', err);
+      errorEl.textContent = 'เกิดข้อผิดพลาด: ' + err.message;
+    } finally {
+      saveBtn.disabled = false;
+    }
   }
 
   async function handlePmTargetChange(evt) {
@@ -1116,6 +1375,12 @@ const APP_CORE = (() => {
     refreshReport();
   }
 
+  function setReportUnit(unit) {
+    STATE_STORE.set('reportUnit', unit);
+    UI_RENDERER.setReportUnitButtons(unit);
+    refreshReport();
+  }
+
   function buildReportRangeCaption(rows, mode, rangeVal) {
     if (!rows.length) return '';
     const latest = rows[0].label;
@@ -1128,10 +1393,11 @@ const APP_CORE = (() => {
 
   async function refreshReport() {
     const mode = STATE_STORE.get('reportMode');
+    const unit = STATE_STORE.get('reportUnit');
     const rangeVal = document.getElementById('reportRangeSelect').value;
     let rows = mode === 'daily' ? await STORAGE_ENGINE.getDailyAggregates() : await STORAGE_ENGINE.getMonthlyAggregates();
     if (rangeVal !== 'all') rows = rows.slice(0, parseInt(rangeVal, 10));
-    UI_RENDERER.renderReportTable(rows, mode);
+    UI_RENDERER.renderReportTable(rows, mode, unit);
     UI_RENDERER.setReportRangeCaption(buildReportRangeCaption(rows, mode, rangeVal));
   }
 
@@ -1151,6 +1417,37 @@ const APP_CORE = (() => {
       unit, resetRec: await STORAGE_ENGINE.getReset(unit),
     })));
     UI_RENDERER.renderResetInfo(units);
+  }
+
+  async function refreshResetHistory() {
+    const perUnit = await Promise.all(APP_CONFIG.UNITS.map(async (unit) => {
+      const resetRec = await STORAGE_ENGINE.getReset(unit);
+      return ((resetRec && resetRec.resetHistory) || []).map((entry) => ({ ...entry, unit }));
+    }));
+    const records = perUnit.flat().sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    UI_RENDERER.renderResetHistoryTable(records);
+  }
+
+  async function refreshFilterCounts() {
+    for (const unit of APP_CONFIG.UNITS) {
+      const records = await STORAGE_ENGINE.getFilterChangesByEquipment(unit);
+      UI_RENDERER.updateFilterCount(unit, records.length);
+    }
+  }
+
+  async function refreshFilterChanges() {
+    const all = await STORAGE_ENGINE.getAllFilterChanges();
+    const summary = APP_CONFIG.UNITS.map((unit) => {
+      const records = all.filter((r) => r.equipment === unit);
+      const totalCost = records.reduce((sum, r) => sum + (r.cost || 0), 0);
+      const lastChangedAt = records.reduce((latest, r) => (!latest || r.changedAt > latest ? r.changedAt : latest), null);
+      return { unit, count: records.length, totalCost, lastChangedAt };
+    });
+    UI_RENDERER.renderFilterSummary(summary);
+    for (const s of summary) UI_RENDERER.updateFilterCount(s.unit, s.count);
+
+    const sorted = [...all].sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
+    UI_RENDERER.renderFilterHistoryTable(sorted);
   }
 
   /* ---- Session add / edit modal ---- */
@@ -1287,6 +1584,102 @@ const APP_CORE = (() => {
     }
   }
 
+  /* ---- Filter change add / edit modal ---- */
+
+  function openAddFilterChangeModal(unit) {
+    editingFilterChangeId = null;
+    filterChangeUnit = unit;
+    document.getElementById('filterModalTitle').textContent = `บันทึกเปลี่ยน Filter — PM-500${unit}`;
+    document.getElementById('filterForm').reset();
+    document.getElementById('fFilterNoteRequiredMark').textContent = '';
+    document.getElementById('filterFormError').textContent = '';
+    document.getElementById('fFilterDate').value = APP_CONFIG.dayKey(new Date());
+    UI_RENDERER.showModal('filterModalOverlay');
+  }
+
+  async function openEditFilterChangeModal(id) {
+    const record = await STORAGE_ENGINE.getFilterChangeById(id);
+    if (!record) return;
+    editingFilterChangeId = id;
+    filterChangeUnit = record.equipment;
+    document.getElementById('filterModalTitle').textContent = `แก้ไขรายการเปลี่ยน Filter — PM-500${record.equipment}`;
+    document.getElementById('filterFormError').textContent = '';
+    document.getElementById('fFilterDate').value = APP_CONFIG.dayKey(record.changedAt);
+    document.getElementById('fFilterCost').value = record.cost != null ? record.cost : '';
+    document.getElementById('fFilterNote').value = '';
+    document.getElementById('fFilterNoteRequiredMark').textContent = '*';
+    UI_RENDERER.showModal('filterModalOverlay');
+  }
+
+  function closeFilterModal() {
+    UI_RENDERER.hideModal('filterModalOverlay');
+    editingFilterChangeId = null;
+    filterChangeUnit = null;
+  }
+
+  async function handleFilterFormSubmit(evt) {
+    evt.preventDefault();
+    const errorEl = document.getElementById('filterFormError');
+    errorEl.textContent = '';
+
+    const dateVal = document.getElementById('fFilterDate').value;
+    const costVal = document.getElementById('fFilterCost').value;
+    const note = document.getElementById('fFilterNote').value.trim();
+
+    if (!dateVal) { errorEl.textContent = 'กรุณาระบุวันที่เปลี่ยน'; return; }
+    if (editingFilterChangeId != null && !note) { errorEl.textContent = 'กรุณาระบุหมายเหตุ/เหตุผลที่แก้ไข'; return; }
+
+    const todayKey = APP_CONFIG.dayKey(new Date());
+    if (dateVal > todayKey) { errorEl.textContent = 'วันที่เปลี่ยนต้องไม่เป็นอนาคต'; return; }
+
+    const cost = costVal === '' ? null : Number(costVal);
+    if (cost != null && (!Number.isFinite(cost) || cost < 0)) { errorEl.textContent = 'ค่าใช้จ่ายต้องเป็นตัวเลขไม่ติดลบ'; return; }
+
+    const changedAtISO = new Date(dateVal + 'T00:00:00.000Z').toISOString();
+    const saveBtn = document.getElementById('filterModalSaveBtn');
+    saveBtn.disabled = true;
+    try {
+      const now = new Date().toISOString();
+      if (editingFilterChangeId == null) {
+        await STORAGE_ENGINE.addFilterChange({
+          equipment: filterChangeUnit, changedAt: changedAtISO, cost, note,
+          createdAt: now, updatedAt: now,
+        });
+        UI_RENDERER.toast('บันทึกเปลี่ยน Filter เรียบร้อยแล้ว');
+      } else {
+        await STORAGE_ENGINE.updateFilterChange(editingFilterChangeId, { changedAt: changedAtISO, cost, note });
+        UI_RENDERER.toast('แก้ไขรายการเปลี่ยน Filter เรียบร้อยแล้ว');
+      }
+      closeFilterModal();
+      await Promise.all([refreshFilterCounts(), refreshFilterChanges()]);
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleFilterFormSubmit', err);
+      errorEl.textContent = 'เกิดข้อผิดพลาด: ' + err.message;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  }
+
+  function handleFilterHistoryTableClick(evt) {
+    const btn = evt.target.closest('button[data-action]');
+    if (!btn) return;
+    const id = Number(btn.dataset.id);
+    if (btn.dataset.action === 'edit') {
+      openEditFilterChangeModal(id);
+    } else if (btn.dataset.action === 'delete') {
+      openConfirmModal({
+        title: 'ลบรายการเปลี่ยน Filter',
+        body: 'ยืนยันการลบรายการนี้? การลบไม่สามารถย้อนกลับได้',
+        requireNote: false,
+        onConfirm: async () => {
+          await STORAGE_ENGINE.deleteFilterChange(id);
+          await Promise.all([refreshFilterCounts(), refreshFilterChanges()]);
+          UI_RENDERER.toast('ลบรายการเรียบร้อยแล้ว');
+        },
+      });
+    }
+  }
+
   /* ---- Clear all test data (dev control) ---- */
 
   function handleClearAllDataRequest() {
@@ -1297,7 +1690,7 @@ const APP_CORE = (() => {
     }
     openConfirmModal({
       title: 'ลบข้อมูลทดสอบทั้งหมด',
-      body: 'การลบนี้จะลบประวัติ Session และประวัติการรีเซ็ตของทั้ง PM-500A และ PM-500B ทั้งหมดอย่างถาวร ไม่สามารถกู้คืนได้ ใช้เฉพาะก่อนเริ่มใช้งานจริงเท่านั้น',
+      body: 'การลบนี้จะลบประวัติ Session, ประวัติการรีเซ็ต และประวัติการเปลี่ยน Filter ของทั้ง PM-500A และ PM-500B ทั้งหมดอย่างถาวร ไม่สามารถกู้คืนได้ ใช้เฉพาะก่อนเริ่มใช้งานจริงเท่านั้น',
       confirmPhrase: 'ลบทั้งหมด',
       onConfirm: async () => {
         await STORAGE_ENGINE.clearAllData();
@@ -1306,7 +1699,7 @@ const APP_CORE = (() => {
           UI_RENDERER.setUnitStatus(unit, 'stopped');
           UI_RENDERER.updateTimer(unit, 0);
         }
-        await Promise.all([refreshHistory(), refreshReport(), refreshCumulativeCards(), refreshTrendChart()]);
+        await Promise.all([refreshHistory(), refreshReport(), refreshCumulativeCards(), refreshTrendChart(), refreshFilterCounts(), refreshFilterChanges()]);
         UI_RENDERER.toast('ลบข้อมูลทดสอบทั้งหมดเรียบร้อยแล้ว เริ่มนับใหม่จาก 0');
       },
     });
