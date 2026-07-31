@@ -105,6 +105,7 @@ const APP_CONFIG = (() => {
 
   const DEFAULT_PM_TARGET_DAYS = 30;
   const LONG_RUN_WARNING_HOURS = 12;
+  const DEFAULT_FILTER_TARGET_HOURS = 720;
 
   function pmProgressPercent(cumulativeSec, pmTargetDays) {
     const targetDays = (pmTargetDays == null || !Number.isFinite(pmTargetDays) || pmTargetDays <= 0)
@@ -140,7 +141,7 @@ const APP_CONFIG = (() => {
     DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, STORE_FILTER_CHANGES, UNITS, UNIT_LABEL,
     pad2, bangkokParts, dayKey, formatDayKeyBE, formatMonthKeyBE,
     formatDateTimeBE, formatClock, formatHours, formatDays, formatBaht, localInputToISO, isoToLocalInput,
-    DEFAULT_PM_TARGET_DAYS, LONG_RUN_WARNING_HOURS, pmProgressPercent, pmFillColor,
+    DEFAULT_PM_TARGET_DAYS, LONG_RUN_WARNING_HOURS, DEFAULT_FILTER_TARGET_HOURS, pmProgressPercent, pmFillColor,
   };
 })();
 
@@ -345,6 +346,57 @@ const STORAGE_ENGINE = (() => {
     return reqToPromise(store.getAll());
   }
 
+  // Accumulated runtime hours since the unit's last filter change (across
+  // all sessions, independent of PM-reset cycles) — null if never changed.
+  async function getHoursSinceLastFilterChange(equipment) {
+    const [sessions, changes] = await Promise.all([
+      getSessionsByEquipment(equipment),
+      getFilterChangesByEquipment(equipment),
+    ]);
+    if (!changes.length) return null;
+    const lastChangedAt = changes.reduce(
+      (latest, r) => (!latest || r.changedAt > latest ? r.changedAt : latest), null,
+    );
+    const resetAt = new Date(lastChangedAt).getTime();
+    return sumSessionsSinceReset(sessions, resetAt) / 3600;
+  }
+
+  // Full backup of every store — shape mirrors what importAllData expects back.
+  async function exportAllData() {
+    const [sessions, resets, filterChanges] = await Promise.all([
+      getAllSessions(),
+      Promise.all(APP_CONFIG.UNITS.map((u) => getReset(u))),
+      getAllFilterChanges(),
+    ]);
+    return {
+      app: 'pm500-runtime-tracker',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      sessions,
+      resets: resets.filter(Boolean),
+      filterChanges,
+    };
+  }
+
+  // Wipes all stores then re-inserts every record with its original key intact
+  // (autoIncrement stores bump their key generator past any explicit numeric
+  // key on put(), so ids stay stable and future adds won't collide).
+  async function importAllData(data) {
+    await clearAllData();
+    for (const s of (data.sessions || [])) {
+      const store = await tx(APP_CONFIG.STORE_SESSIONS, 'readwrite');
+      await reqToPromise(store.put(s));
+    }
+    for (const r of (data.resets || [])) {
+      const store = await tx(APP_CONFIG.STORE_RESETS, 'readwrite');
+      await reqToPromise(store.put(r));
+    }
+    for (const f of (data.filterChanges || [])) {
+      const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
+      await reqToPromise(store.put(f));
+    }
+  }
+
   // Wipes all stores entirely — used only by the "clear test data" dev control.
   async function clearAllData() {
     const sessionsStore = await tx(APP_CONFIG.STORE_SESSIONS, 'readwrite');
@@ -528,7 +580,8 @@ const STORAGE_ENGINE = (() => {
     getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
     getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCumulativeSinceUntil, getCycleUsageTrend,
     addFilterChange, updateFilterChange, deleteFilterChange, getFilterChangeById,
-    getFilterChangesByEquipment, getAllFilterChanges,
+    getFilterChangesByEquipment, getAllFilterChanges, getHoursSinceLastFilterChange,
+    exportAllData, importAllData,
   };
 })();
 
@@ -599,6 +652,7 @@ const UI_RENDERER = (() => {
           <span class="filter-count-label">เปลี่ยน Filter แล้ว <b id="filterCount-${unit}">0</b> ครั้ง</span>
           <button type="button" class="btn-ghost btn" id="filterChangeBtn-${unit}">🧰 บันทึกเปลี่ยน Filter</button>
         </div>
+        <div class="filter-overdue-warning" id="filterOverdueWarning-${unit}" style="display:none;">⚠️ ถึงกำหนดเปลี่ยน Filter แล้ว</div>
       </div>`;
   }
 
@@ -655,6 +709,11 @@ const UI_RENDERER = (() => {
 
   function setLongRunWarning(unit, show) {
     const el = document.getElementById(`longRunWarning-${unit}`);
+    if (el) el.style.display = show ? '' : 'none';
+  }
+
+  function setFilterOverdueWarning(unit, show) {
+    const el = document.getElementById(`filterOverdueWarning-${unit}`);
     if (el) el.style.display = show ? '' : 'none';
   }
 
@@ -1011,7 +1070,7 @@ const UI_RENDERER = (() => {
     const grid = document.getElementById('filterSummaryGrid');
     grid.innerHTML = '';
     let totalCount = 0, totalCost = 0;
-    for (const { unit, count, totalCost: unitCost, lastChangedAt } of units) {
+    for (const { unit, count, totalCost: unitCost, lastChangedAt, filterTargetHours } of units) {
       totalCount += count;
       totalCost += unitCost;
 
@@ -1037,6 +1096,25 @@ const UI_RENDERER = (() => {
       lastEl.className = 'reset-info-note';
       lastEl.textContent = lastChangedAt ? `เปลี่ยนล่าสุด: ${APP_CONFIG.formatDayKeyBE(APP_CONFIG.dayKey(lastChangedAt))}` : 'ยังไม่เคยเปลี่ยน';
       item.appendChild(lastEl);
+
+      const targetWrap = document.createElement('div');
+      targetWrap.className = 'reset-pm-target';
+
+      const targetLabel = document.createElement('label');
+      targetLabel.setAttribute('for', `filterTarget-${unit}`);
+      targetLabel.textContent = 'เป้าหมายเปลี่ยน Filter ทุก (ชม.)';
+      targetWrap.appendChild(targetLabel);
+
+      const targetInput = document.createElement('input');
+      targetInput.type = 'number';
+      targetInput.id = `filterTarget-${unit}`;
+      targetInput.min = '1'; targetInput.max = '8760'; targetInput.step = '1';
+      targetInput.value = String(filterTargetHours || APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS);
+      targetInput.dataset.unit = unit;
+      targetInput.dataset.filterTarget = '1';
+      targetWrap.appendChild(targetInput);
+
+      item.appendChild(targetWrap);
 
       grid.appendChild(item);
     }
@@ -1110,7 +1188,7 @@ const UI_RENDERER = (() => {
     initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, setLongRunWarning, toast,
     showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportUnitButtons, setReportRangeCaption,
     renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo, renderResetHistoryTable,
-    updateFilterCount, renderFilterSummary, renderFilterHistoryTable,
+    updateFilterCount, renderFilterSummary, renderFilterHistoryTable, setFilterOverdueWarning,
   };
 })();
 
@@ -1132,6 +1210,7 @@ const APP_CORE = (() => {
       wireStaticEvents();
       wireTabEvents();
       await STORAGE_ENGINE.open();
+      await maybeImportSeedData();
       await resumeOpenSessions();
       renderTodayLabel();
       applyStoredTheme();
@@ -1145,6 +1224,16 @@ const APP_CORE = (() => {
       DEBUG_MODULE.log('error', 'APP_CORE.init', err);
       UI_RENDERER.toast('เกิดข้อผิดพลาดในการเริ่มต้นแอป: ' + err.message, 'error');
     }
+  }
+
+  // Seeds a fresh (empty) database from window.__PM500_SEED_DATA__, embedded
+  // by exportStandaloneHtml() into a self-contained backup copy of the app —
+  // only runs once, on first load, and never touches a DB that already has data.
+  async function maybeImportSeedData() {
+    if (!window.__PM500_SEED_DATA__) return;
+    const existing = await STORAGE_ENGINE.getAllSessions();
+    if (existing.length > 0) return;
+    await STORAGE_ENGINE.importAllData(window.__PM500_SEED_DATA__);
   }
 
   async function resumeOpenSessions() {
@@ -1208,6 +1297,17 @@ const APP_CORE = (() => {
 
     document.getElementById('themeToggleBtn').addEventListener('click', toggleTheme);
 
+    document.getElementById('manualBtn').addEventListener('click', openManualModal);
+    document.getElementById('manualModalCloseBtn').addEventListener('click', closeManualModal);
+
+    document.getElementById('settingsBtn').addEventListener('click', openSettingsModal);
+    document.getElementById('settingsModalCloseBtn').addEventListener('click', closeSettingsModal);
+    document.getElementById('exportDataBtn').addEventListener('click', handleExportData);
+    document.getElementById('importDataBtn').addEventListener('click', () => document.getElementById('importFileInput').click());
+    document.getElementById('importFileInput').addEventListener('change', handleImportFileSelected);
+    document.getElementById('exportReportHtmlBtn').addEventListener('click', handleExportReportHtml);
+    document.getElementById('exportStandaloneHtmlBtn').addEventListener('click', handleExportStandaloneHtml);
+
     document.getElementById('addSessionBtn').addEventListener('click', openAddSessionModal);
     document.getElementById('clearAllDataBtn').addEventListener('click', handleClearAllDataRequest);
     document.getElementById('sessionModalCancelBtn').addEventListener('click', closeSessionModal);
@@ -1230,6 +1330,7 @@ const APP_CORE = (() => {
     document.querySelector('#historyTable tbody').addEventListener('click', handleHistoryTableClick);
 
     document.getElementById('resetInfoGrid').addEventListener('change', handlePmTargetChange);
+    document.getElementById('filterSummaryGrid').addEventListener('change', handleFilterTargetChange);
 
     document.getElementById('reportModeDailyBtn').addEventListener('click', () => setReportMode('daily'));
     document.getElementById('reportModeMonthlyBtn').addEventListener('click', () => setReportMode('monthly'));
@@ -1367,6 +1468,7 @@ const APP_CORE = (() => {
         equipment: unit,
         lastResetAt: resetAtISO,
         pmTargetDays: existing && existing.pmTargetDays,
+        filterTargetHours: existing && existing.filterTargetHours,
         resetHistory: [...((existing && existing.resetHistory) || []), {
           ts: resetAtISO, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
           pd2500Pv, pe501OpenCount, lcv2502OpenCount,
@@ -1398,12 +1500,38 @@ const APP_CORE = (() => {
         lastResetAt: (existing && existing.lastResetAt) || null,
         resetHistory: (existing && existing.resetHistory) || [],
         pmTargetDays: days,
+        filterTargetHours: existing && existing.filterTargetHours,
       });
       await refreshCumulativeCards();
       UI_RENDERER.toast(`บันทึกเป้าหมาย PM ของ PM-500${unit} เรียบร้อยแล้ว (${days} วัน)`);
     } catch (err) {
       DEBUG_MODULE.log('error', 'APP_CORE.handlePmTargetChange', err);
       UI_RENDERER.toast('บันทึกเป้าหมาย PM ไม่สำเร็จ: ' + err.message, 'error');
+    }
+  }
+
+  async function handleFilterTargetChange(evt) {
+    const input = evt.target.closest('input[data-filter-target]');
+    if (!input) return;
+    const unit = input.dataset.unit;
+    let hours = parseInt(input.value, 10);
+    if (!Number.isFinite(hours) || hours < 1) hours = APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS;
+    hours = Math.min(8760, Math.max(1, hours));
+    input.value = hours;
+    try {
+      const existing = await STORAGE_ENGINE.getReset(unit);
+      await STORAGE_ENGINE.saveReset({
+        equipment: unit,
+        lastResetAt: (existing && existing.lastResetAt) || null,
+        resetHistory: (existing && existing.resetHistory) || [],
+        pmTargetDays: existing && existing.pmTargetDays,
+        filterTargetHours: hours,
+      });
+      await refreshFilterOverdueWarnings();
+      UI_RENDERER.toast(`บันทึกเป้าหมายเปลี่ยน Filter ของ PM-500${unit} เรียบร้อยแล้ว (${hours} ชม.)`);
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleFilterTargetChange', err);
+      UI_RENDERER.toast('บันทึกเป้าหมายเปลี่ยน Filter ไม่สำเร็จ: ' + err.message, 'error');
     }
   }
 
@@ -1415,6 +1543,7 @@ const APP_CORE = (() => {
       UI_RENDERER.updateCumulative(unit, sec);
       UI_RENDERER.updateTankLevel(unit, APP_CONFIG.pmProgressPercent(sec, pmTargetDays));
     }
+    await refreshFilterOverdueWarnings();
   }
 
   function setReportMode(mode) {
@@ -1485,18 +1614,34 @@ const APP_CORE = (() => {
 
   async function refreshFilterChanges() {
     const all = await STORAGE_ENGINE.getAllFilterChanges();
-    const summary = APP_CONFIG.UNITS.map((unit) => {
+    const summary = await Promise.all(APP_CONFIG.UNITS.map(async (unit) => {
       const records = all.filter((r) => r.equipment === unit);
       const totalCost = records.reduce((sum, r) => sum + (r.cost || 0), 0);
       const lastChangedAt = records.reduce((latest, r) => (!latest || r.changedAt > latest ? r.changedAt : latest), null);
-      return { unit, count: records.length, totalCost, lastChangedAt };
-    });
+      const resetRec = await STORAGE_ENGINE.getReset(unit);
+      const filterTargetHours = (resetRec && resetRec.filterTargetHours) || APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS;
+      return { unit, count: records.length, totalCost, lastChangedAt, filterTargetHours };
+    }));
     UI_RENDERER.renderFilterSummary(summary);
     for (const s of summary) UI_RENDERER.updateFilterCount(s.unit, s.count);
 
     const sorted = [...all].sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
     UI_RENDERER.renderFilterHistoryTable(sorted, 'filterHistoryTable');
     UI_RENDERER.renderFilterHistoryTable(sorted.slice(0, 10), 'dashboardFilterHistoryTable');
+
+    await refreshFilterOverdueWarnings();
+  }
+
+  async function refreshFilterOverdueWarnings() {
+    for (const unit of APP_CONFIG.UNITS) {
+      const [hoursSince, resetRec] = await Promise.all([
+        STORAGE_ENGINE.getHoursSinceLastFilterChange(unit),
+        STORAGE_ENGINE.getReset(unit),
+      ]);
+      const targetHours = (resetRec && resetRec.filterTargetHours) || APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS;
+      const overdue = hoursSince != null && hoursSince >= targetHours;
+      UI_RENDERER.setFilterOverdueWarning(unit, overdue);
+    }
   }
 
   /* ---- Session add / edit modal ---- */
@@ -1809,6 +1954,237 @@ const APP_CORE = (() => {
       errorEl.textContent = 'เกิดข้อผิดพลาด: ' + err.message;
     } finally {
       okBtn.disabled = false;
+    }
+  }
+
+  /* ---- Settings modal (backup / restore / export) ---- */
+
+  function openSettingsModal() { UI_RENDERER.showModal('settingsModalOverlay'); }
+  function closeSettingsModal() { UI_RENDERER.hideModal('settingsModalOverlay'); }
+  function openManualModal() { UI_RENDERER.showModal('manualModalOverlay'); }
+  function closeManualModal() { UI_RENDERER.hideModal('manualModalOverlay'); }
+
+  function escapeHtml(str) {
+    return String(str == null ? '' : str).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  function downloadTextFile(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function handleExportData() {
+    try {
+      const data = await STORAGE_ENGINE.exportAllData();
+      const stamp = APP_CONFIG.dayKey(new Date().toISOString());
+      downloadTextFile(`pm500-backup-${stamp}.json`, JSON.stringify(data, null, 2), 'application/json');
+      UI_RENDERER.toast('ส่งออกข้อมูลเรียบร้อยแล้ว');
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleExportData', err);
+      UI_RENDERER.toast('ส่งออกข้อมูลไม่สำเร็จ: ' + err.message, 'error');
+    }
+  }
+
+  async function handleImportFileSelected(evt) {
+    const file = evt.target.files[0];
+    evt.target.value = '';
+    if (!file) return;
+
+    let data;
+    try {
+      data = JSON.parse(await file.text());
+    } catch (err) {
+      UI_RENDERER.toast('ไฟล์ไม่ถูกต้อง หรือไม่ใช่ไฟล์ JSON', 'error');
+      return;
+    }
+    if (!data || !Array.isArray(data.sessions) || !Array.isArray(data.filterChanges)) {
+      UI_RENDERER.toast('โครงสร้างข้อมูลในไฟล์นี้ไม่ตรงกับรูปแบบของแอปนี้', 'error');
+      return;
+    }
+
+    const anyRunning = APP_CONFIG.UNITS.some((unit) => STATE_STORE.get('unit' + unit).status === 'running');
+    if (anyRunning) {
+      UI_RENDERER.toast('กรุณากดหยุดทำงานทั้งหมดก่อนนำเข้าข้อมูล', 'warn');
+      return;
+    }
+
+    closeSettingsModal();
+    openConfirmModal({
+      title: 'นำเข้าข้อมูล',
+      body: `ไฟล์นี้มีประวัติ Session ${data.sessions.length} รายการ และประวัติเปลี่ยน Filter ${data.filterChanges.length} รายการ`
+        + (data.exportedAt ? ` (ส่งออกเมื่อ ${APP_CONFIG.formatDateTimeBE(data.exportedAt)})` : '')
+        + ' การนำเข้าจะแทนที่ข้อมูลปัจจุบันทั้งหมดอย่างถาวร ไม่สามารถย้อนกลับได้',
+      confirmPhrase: 'นำเข้าข้อมูล',
+      onConfirm: async () => {
+        await STORAGE_ENGINE.importAllData(data);
+        for (const unit of APP_CONFIG.UNITS) {
+          STATE_STORE.set('unit' + unit, { status: 'stopped', openSessionId: null, startTime: null });
+          UI_RENDERER.setUnitStatus(unit, 'stopped');
+          UI_RENDERER.updateTimer(unit, 0);
+        }
+        await Promise.all([
+          refreshHistory(), refreshReport(), refreshCumulativeCards(), refreshTrendChart(),
+          refreshResetInfo(), refreshResetHistory(), refreshFilterCounts(), refreshFilterChanges(),
+        ]);
+        UI_RENDERER.toast('นำเข้าข้อมูลเรียบร้อยแล้ว');
+      },
+    });
+  }
+
+  async function buildReportHtmlDocument() {
+    const [sessions, filterChanges, unitOverview] = await Promise.all([
+      STORAGE_ENGINE.getAllSessions(),
+      STORAGE_ENGINE.getAllFilterChanges(),
+      Promise.all(APP_CONFIG.UNITS.map(async (unit) => {
+        const [{ sec, pmTargetDays }, resetRec, hoursSinceFilter] = await Promise.all([
+          STORAGE_ENGINE.getCumulativeAndTarget(unit),
+          STORAGE_ENGINE.getReset(unit),
+          STORAGE_ENGINE.getHoursSinceLastFilterChange(unit),
+        ]);
+        return {
+          unit, sec, pmTargetDays,
+          filterTargetHours: (resetRec && resetRec.filterTargetHours) || APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS,
+          hoursSinceFilter,
+        };
+      })),
+    ]);
+
+    sessions.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+    const resetRows = [];
+    for (const unit of APP_CONFIG.UNITS) {
+      const resetRec = await STORAGE_ENGINE.getReset(unit);
+      for (const h of (resetRec && resetRec.resetHistory) || []) resetRows.push({ ...h, unit });
+    }
+    resetRows.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    const filterRows = [...filterChanges].sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
+
+    const overviewHtml = unitOverview.map((o) => `
+      <tr>
+        <td>${escapeHtml(APP_CONFIG.UNIT_LABEL[o.unit])}</td>
+        <td>${APP_CONFIG.formatHours(o.sec, 1)} ชม.</td>
+        <td>${o.pmTargetDays} วัน</td>
+        <td>${o.filterTargetHours} ชม.</td>
+        <td>${o.hoursSinceFilter == null ? 'ยังไม่เคยเปลี่ยน' : APP_CONFIG.formatHours(o.hoursSinceFilter * 3600, 1) + ' ชม.'}</td>
+      </tr>`).join('');
+
+    const sessionRows = sessions.map((s) => `
+      <tr>
+        <td>${escapeHtml(APP_CONFIG.UNIT_LABEL[s.equipment])}</td>
+        <td>${APP_CONFIG.formatDateTimeBE(s.startTime)}</td>
+        <td>${s.endTime ? APP_CONFIG.formatDateTimeBE(s.endTime) : 'กำลังทำงาน'}</td>
+        <td>${APP_CONFIG.formatHours(STORAGE_ENGINE.effectiveDurationSec(s), 2)} ชม.</td>
+      </tr>`).join('');
+
+    const resetTableRows = resetRows.map((r) => `
+      <tr>
+        <td>${escapeHtml(APP_CONFIG.UNIT_LABEL[r.unit])}</td>
+        <td>${APP_CONFIG.formatDateTimeBE(r.ts)}</td>
+        <td>${(r.hoursAtReset || 0).toFixed(2)} ชม.</td>
+        <td>${((r.hoursAtReset || 0) / 24).toFixed(2)} วัน</td>
+        <td>${r.pd2500Pv ?? ''}</td>
+        <td>${r.pe501OpenCount ?? ''}</td>
+        <td>${r.lcv2502OpenCount ?? ''}</td>
+        <td>${escapeHtml(r.note || '')}</td>
+      </tr>`).join('');
+
+    const filterTableRows = filterRows.map((f) => `
+      <tr>
+        <td>${escapeHtml(APP_CONFIG.UNIT_LABEL[f.equipment])}</td>
+        <td>${APP_CONFIG.formatDayKeyBE(APP_CONFIG.dayKey(f.changedAt))}</td>
+        <td>${APP_CONFIG.formatBaht(f.cost || 0)}</td>
+        <td>${escapeHtml(f.note || '')}</td>
+      </tr>`).join('');
+
+    return `<!DOCTYPE html>
+<html lang="th"><head><meta charset="UTF-8">
+<title>รายงานสรุป PM-500 Runtime Tracker</title>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 24px; color:#111; }
+  h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 28px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 0.85rem; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  th { background: #f0f0f0; }
+  .meta { color: #666; font-size: 0.85rem; }
+  @media print { body { margin: 8px; } }
+</style>
+</head><body>
+  <h1>📊 รายงานสรุป PM-500 Runtime Tracker</h1>
+  <p class="meta">สร้างเมื่อ ${escapeHtml(APP_CONFIG.formatDateTimeBE(new Date().toISOString()))}</p>
+
+  <h2>ภาพรวม</h2>
+  <table>
+    <tr><th>เครื่อง</th><th>ชั่วโมงสะสม</th><th>เป้าหมาย PM/รอบ</th><th>เป้าหมายเปลี่ยน Filter</th><th>ชม. ตั้งแต่เปลี่ยน Filter ล่าสุด</th></tr>
+    ${overviewHtml}
+  </table>
+
+  <h2>ประวัติ Session (${sessions.length} รายการ)</h2>
+  <table>
+    <tr><th>เครื่อง</th><th>เริ่ม</th><th>หยุด</th><th>ระยะเวลา</th></tr>
+    ${sessionRows || '<tr><td colspan="4">ไม่มีข้อมูล</td></tr>'}
+  </table>
+
+  <h2>ประวัติการรีเซ็ต (${resetRows.length} รายการ)</h2>
+  <table>
+    <tr><th>เครื่อง</th><th>วันที่/เวลา</th><th>ชม.ตอนรีเซ็ต</th><th>จำนวนวัน</th><th>PD-2500.PV</th><th>PE-501</th><th>LCV-2502</th><th>หมายเหตุ</th></tr>
+    ${resetTableRows || '<tr><td colspan="8">ไม่มีข้อมูล</td></tr>'}
+  </table>
+
+  <h2>ประวัติการเปลี่ยน Filter (${filterRows.length} รายการ)</h2>
+  <table>
+    <tr><th>เครื่อง</th><th>วันที่เปลี่ยน</th><th>ค่าใช้จ่าย</th><th>หมายเหตุ</th></tr>
+    ${filterTableRows || '<tr><td colspan="4">ไม่มีข้อมูล</td></tr>'}
+  </table>
+</body></html>`;
+  }
+
+  async function handleExportReportHtml() {
+    try {
+      const html = await buildReportHtmlDocument();
+      const stamp = APP_CONFIG.dayKey(new Date().toISOString());
+      downloadTextFile(`pm500-report-${stamp}.html`, html, 'text/html');
+      UI_RENDERER.toast('ส่งออกรายงานสรุปเรียบร้อยแล้ว');
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleExportReportHtml', err);
+      UI_RENDERER.toast('ส่งออกรายงานไม่สำเร็จ: ' + err.message, 'error');
+    }
+  }
+
+  async function handleExportStandaloneHtml() {
+    try {
+      const [htmlText, jsText, seedData] = await Promise.all([
+        fetch('index.html').then((r) => {
+          if (!r.ok) throw new Error('โหลด index.html ไม่สำเร็จ');
+          return r.text();
+        }),
+        fetch('app.js').then((r) => {
+          if (!r.ok) throw new Error('โหลด app.js ไม่สำเร็จ');
+          return r.text();
+        }),
+        STORAGE_ENGINE.exportAllData(),
+      ]);
+
+      const safeSeedJson = JSON.stringify(seedData).replace(/</g, '\\u003c');
+      const inlineScript = `<script>window.__PM500_SEED_DATA__ = ${safeSeedJson};<\/script>\n<script>${jsText}<\/script>`;
+      if (!htmlText.includes('<script src="app.js"></script>')) {
+        throw new Error('ไม่พบตำแหน่งฝังสคริปต์ใน index.html');
+      }
+      const combined = htmlText.replace('<script src="app.js"></script>', inlineScript);
+
+      const stamp = APP_CONFIG.dayKey(new Date().toISOString());
+      downloadTextFile(`pm500-standalone-${stamp}.html`, combined, 'text/html');
+      UI_RENDERER.toast('ส่งออกสำเนาแอปแบบ Standalone เรียบร้อยแล้ว');
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'APP_CORE.handleExportStandaloneHtml', err);
+      UI_RENDERER.toast('ส่งออกสำเนาแอปไม่สำเร็จ: ' + err.message + ' (ต้องเปิดผ่านเว็บเซิร์ฟเวอร์ ไม่ใช่ file://)', 'error');
     }
   }
 

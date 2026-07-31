@@ -213,7 +213,7 @@
   .timer-row { display:flex; align-items:baseline; gap:8px; }
   .timer-label { font-size:0.8rem; color: var(--text-muted); }
   .timer-value { font-size: 2.1rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; }
-  .long-run-warning, .pm-overdue-warning {
+  .long-run-warning, .pm-overdue-warning, .filter-overdue-warning {
     font-size: 0.8rem; font-weight: 600; color: var(--red-strong);
     background: rgba(220,38,38,0.1); border: 1px solid rgba(220,38,38,0.3);
     border-radius: var(--radius-sm); padding: 6px 10px; margin-top: 8px;
@@ -347,6 +347,16 @@
     max-height: 90vh; overflow-y: auto;
   }
   .modal h3 { margin: 0 0 16px; font-size: 1.1rem; }
+  .modal-wide { max-width: 620px; }
+  .settings-group { margin-bottom: 18px; }
+  .settings-group h4 { margin: 0 0 8px; font-size: 0.85rem; color: var(--text-muted); font-weight:700; }
+  .settings-group .btn { width: 100%; text-align: left; margin-bottom: 8px; }
+  .settings-hint { font-size: 0.76rem; color: var(--text-muted); margin: -4px 0 10px; }
+  .manual-body { font-size: 0.9rem; line-height: 1.7; }
+  .manual-body h4 { margin: 18px 0 6px; font-size: 0.95rem; }
+  .manual-body h4:first-child { margin-top: 0; }
+  .manual-body ul { margin: 4px 0; padding-left: 20px; }
+  .manual-body li { margin-bottom: 4px; }
   .field { margin-bottom: 14px; display:flex; flex-direction: column; gap: 6px; }
   .field label { font-size: 0.82rem; color: var(--text-muted); font-weight:600; }
   .field input, .field select { width: 100%; }
@@ -373,6 +383,8 @@
     <h1>⏱️ PM-500 Runtime Tracker</h1>
     <div class="header-right">
       <span id="todayLabel"></span>
+      <button class="icon-btn" id="manualBtn" type="button" title="คู่มือการใช้งาน" aria-label="คู่มือการใช้งาน">📖</button>
+      <button class="icon-btn" id="settingsBtn" type="button" title="ตั้งค่า" aria-label="ตั้งค่า">⚙️</button>
       <button class="icon-btn" id="themeToggleBtn" type="button" title="สลับธีมสว่าง/มืด" aria-label="สลับธีมสว่าง/มืด">🌙</button>
     </div>
   </header>
@@ -688,6 +700,84 @@
     <div class="modal-actions">
       <button type="button" class="btn btn-secondary" id="confirmModalCancelBtn">ยกเลิก</button>
       <button type="button" class="btn btn-danger" id="confirmModalOkBtn">ยืนยัน</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settingsModalOverlay">
+  <div class="modal modal-wide">
+    <h3>⚙️ ตั้งค่า</h3>
+
+    <div class="settings-group">
+      <h4>💾 สำรอง/กู้คืนข้อมูล</h4>
+      <p class="settings-hint">ครอบคลุมประวัติ Session, ประวัติการรีเซ็ต และประวัติการเปลี่ยน Filter ของทั้งสองเครื่อง</p>
+      <button type="button" class="btn btn-ghost" id="exportDataBtn">📤 ส่งออกข้อมูล (.json)</button>
+      <button type="button" class="btn btn-ghost" id="importDataBtn">📥 นำเข้าข้อมูล (.json)</button>
+      <input type="file" id="importFileInput" accept="application/json,.json" style="display:none">
+    </div>
+
+    <div class="settings-group">
+      <h4>📄 ส่งออกไฟล์ HTML</h4>
+      <button type="button" class="btn btn-ghost" id="exportReportHtmlBtn">🖨️ รายงานสรุป (พิมพ์ได้)</button>
+      <button type="button" class="btn btn-ghost" id="exportStandaloneHtmlBtn">💾 สำเนาแอปแบบ Standalone (พร้อมข้อมูลปัจจุบัน)</button>
+      <p class="settings-hint">สำเนาแอป Standalone ต้องเปิดผ่านเว็บเซิร์ฟเวอร์ (http/https) ถึงจะสร้างได้ ไม่สามารถสร้างได้ถ้าเปิดไฟล์ index.html ตรงๆ แบบ file://</p>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" id="settingsModalCloseBtn">ปิด</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manual Modal -->
+<div class="modal-overlay" id="manualModalOverlay">
+  <div class="modal modal-wide">
+    <h3>📖 คู่มือการใช้งาน</h3>
+    <div class="manual-body">
+      <h4>เริ่ม/หยุดทำงาน</h4>
+      <ul>
+        <li>กด "▶ เริ่มทำงาน" เมื่อเริ่มเดินเครื่อง PM-500A/B — ตัวจับเวลาจะเริ่มนับทันที</li>
+        <li>กด "⏹ หยุดทำงาน" เมื่อหยุดเดินเครื่อง ระบบจะบันทึกเป็น 1 Session ลงประวัติอัตโนมัติ</li>
+        <li>ถ้าเปิดเครื่องต่อเนื่องนานเกิน 12 ชม. การ์ดจะขึ้นป้ายเตือนสีแดง เผื่อกรณีลืมกดหยุด</li>
+      </ul>
+
+      <h4>ชั่วโมงสะสม / รีเซ็ต PM</h4>
+      <ul>
+        <li>"ชั่วโมงสะสม" นับรวมทุก Session ตั้งแต่การรีเซ็ตครั้งล่าสุด</li>
+        <li>กด "รีเซ็ต" เมื่อครบรอบ PM — ต้องกรอกค่า PD-2500.PV, จำนวนรอบเปิด B/V bypass PE-501/LCV-2502 และหมายเหตุ</li>
+        <li>ถ้าลืมกดรีเซ็ตตอนนั้นจริง สามารถเลือก "วันที่/เวลาที่จะรีเซ็ต" ย้อนหลังในฟอร์มได้ ระบบจะคำนวณชั่วโมงสะสม ณ เวลานั้นให้ถูกต้อง</li>
+        <li>ตั้ง "เป้าหมาย PM ต่อรอบ (วัน)" แยกได้ต่อเครื่องในแท็บ "รายงานสรุป"</li>
+      </ul>
+
+      <h4>แก้ไขประวัติ Session ย้อนหลัง</h4>
+      <ul>
+        <li>ในแท็บ "ประวัติ Session" กด "แก้ไข" ที่แถวใดก็ได้เพื่อแก้เวลาเริ่ม/เวลาหยุดย้อนหลัง</li>
+        <li>ถ้า Session ยังทำงานอยู่ (ลืมกดหยุด) ใส่ "เวลาหยุด" ย้อนหลังในฟอร์มนี้เพื่อปิด Session ได้เลย โดยไม่ต้องกดหยุดสด</li>
+      </ul>
+
+      <h4>เปลี่ยน Filter</h4>
+      <ul>
+        <li>กด "🧰 บันทึกเปลี่ยน Filter" ที่การ์ดของเครื่องนั้นทุกครั้งที่เปลี่ยน Filter จริง — ระบุค่าใช้จ่ายและหมายเหตุได้</li>
+        <li>เมื่อชั่วโมงทำงานสะสมนับจากครั้งที่เปลี่ยนล่าสุด ถึงเป้าหมายที่ตั้งไว้ (แท็บ Filter) การ์ดจะขึ้นป้ายเตือน "ถึงกำหนดเปลี่ยน Filter แล้ว"</li>
+        <li>ตั้งเป้าหมายชั่วโมงแยกได้ต่อเครื่องในแท็บ "Filter"</li>
+      </ul>
+
+      <h4>รายงาน</h4>
+      <ul>
+        <li>แท็บ "รายงานสรุป" ดูสรุปรายวัน/รายเดือนแยกทีละเครื่อง พร้อมกราฟชั่วโมงใช้งานต่อรอบ</li>
+      </ul>
+
+      <h4>⚙️ ตั้งค่า</h4>
+      <ul>
+        <li><b>ส่งออกข้อมูล (.json)</b> — สำรองข้อมูลทั้งหมดเก็บไว้ หรือย้ายไปเปิดเครื่องอื่น</li>
+        <li><b>นำเข้าข้อมูล (.json)</b> — กู้คืนจากไฟล์สำรอง (จะแทนที่ข้อมูลปัจจุบันทั้งหมด ต้องยืนยันก่อนเสมอ)</li>
+        <li><b>รายงานสรุป (พิมพ์ได้)</b> — ไฟล์ HTML สรุปข้อมูลทั้งหมด เปิดดู/พิมพ์ได้โดยไม่ต้องใช้แอป</li>
+        <li><b>สำเนาแอปแบบ Standalone</b> — ไฟล์ HTML ที่รันแอปได้ในตัวเอง พร้อมฝังข้อมูลปัจจุบันไว้ เผื่อเก็บสำรองแบบเปิดใช้งานต่อได้ทันที</li>
+      </ul>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secondary" id="manualModalCloseBtn">ปิด</button>
     </div>
   </div>
 </div>
