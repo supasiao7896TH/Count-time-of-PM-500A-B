@@ -484,6 +484,12 @@ const STORAGE_ENGINE = (() => {
 const UI_RENDERER = (() => {
   'use strict';
 
+  function buildTankFlowParticlesHTML() {
+    return Array.from({ length: 6 }, (_, i) =>
+      `<div class="tank-flow-particle tank-flow-particle-${i + 1}"></div>`
+    ).join('');
+  }
+
   function buildUnitCardHTML(unit) {
     const label = APP_CONFIG.UNIT_LABEL[unit];
     return `
@@ -508,9 +514,7 @@ const UI_RENDERER = (() => {
               <div class="tank-fill" id="tankFill-${unit}"></div>
               <div class="tank-rim"></div>
               <div class="tank-panel-lines"></div>
-              <svg class="tank-flow-through-svg" viewBox="0 0 112 150">
-                <path class="tank-pipe-flow-path" d="M56,0 L56,150"/>
-              </svg>
+              ${buildTankFlowParticlesHTML()}
             </div>
             <div class="tank-pipe-wrap">
               <svg class="tank-pipe-svg tank-pipe-svg-out" viewBox="0 0 76 44">
