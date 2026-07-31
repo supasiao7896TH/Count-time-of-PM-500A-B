@@ -104,6 +104,7 @@ const APP_CONFIG = (() => {
   }
 
   const DEFAULT_PM_TARGET_DAYS = 30;
+  const LONG_RUN_WARNING_HOURS = 12;
 
   function pmProgressPercent(cumulativeSec, pmTargetDays) {
     const targetDays = (pmTargetDays == null || !Number.isFinite(pmTargetDays) || pmTargetDays <= 0)
@@ -139,7 +140,7 @@ const APP_CONFIG = (() => {
     DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, STORE_FILTER_CHANGES, UNITS, UNIT_LABEL,
     pad2, bangkokParts, dayKey, formatDayKeyBE, formatMonthKeyBE,
     formatDateTimeBE, formatClock, formatHours, formatDays, formatBaht, localInputToISO, isoToLocalInput,
-    DEFAULT_PM_TARGET_DAYS, pmProgressPercent, pmFillColor,
+    DEFAULT_PM_TARGET_DAYS, LONG_RUN_WARNING_HOURS, pmProgressPercent, pmFillColor,
   };
 })();
 
@@ -559,9 +560,11 @@ const UI_RENDERER = (() => {
             </div>
           </div>
           <div class="tank-progress-label">ความคืบหน้ารอบ PM: <span id="tankPct-${unit}">0%</span></div>
+          <div class="pm-overdue-warning" id="pmOverdueWarning-${unit}" style="display:none;">⚠️ เกินเป้าหมาย PM แล้ว กรุณารีเซ็ต</div>
         </div>
         <div class="timer-row"><span class="timer-label">เวลาทำงาน (session ปัจจุบัน)</span></div>
         <div class="timer-value" id="timer-${unit}">00:00:00</div>
+        <div class="long-run-warning" id="longRunWarning-${unit}" style="display:none;">⚠️ ทำงานต่อเนื่องนานผิดปกติ (เกิน ${APP_CONFIG.LONG_RUN_WARNING_HOURS} ชม.) — ตรวจสอบว่าลืมกดหยุดทำงานหรือไม่</div>
         <div class="cumulative-row"><span class="timer-label">ชั่วโมงสะสม (ตั้งแต่รีเซ็ตล่าสุด)</span></div>
         <div>
           <span class="cumulative-value" id="cumulative-${unit}">0.0 ชม.</span>
@@ -626,6 +629,13 @@ const UI_RENDERER = (() => {
     }
     const pctEl = document.getElementById(`tankPct-${unit}`);
     if (pctEl) pctEl.textContent = Math.round(clamped) + '%';
+    const overdueEl = document.getElementById(`pmOverdueWarning-${unit}`);
+    if (overdueEl) overdueEl.style.display = clamped >= 100 ? '' : 'none';
+  }
+
+  function setLongRunWarning(unit, show) {
+    const el = document.getElementById(`longRunWarning-${unit}`);
+    if (el) el.style.display = show ? '' : 'none';
   }
 
   function toast(message, type) {
@@ -1076,7 +1086,7 @@ const UI_RENDERER = (() => {
   }
 
   return {
-    initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, toast,
+    initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, setLongRunWarning, toast,
     showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportUnitButtons, setReportRangeCaption,
     renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo, renderResetHistoryTable,
     updateFilterCount, renderFilterSummary, renderFilterHistoryTable,
@@ -1154,6 +1164,9 @@ const APP_CORE = (() => {
         if (st.status === 'running') {
           const elapsedSec = (Date.now() - new Date(st.startTime).getTime()) / 1000;
           UI_RENDERER.updateTimer(unit, elapsedSec);
+          UI_RENDERER.setLongRunWarning(unit, elapsedSec > APP_CONFIG.LONG_RUN_WARNING_HOURS * 3600);
+        } else {
+          UI_RENDERER.setLongRunWarning(unit, false);
         }
       }
     }, 1000);

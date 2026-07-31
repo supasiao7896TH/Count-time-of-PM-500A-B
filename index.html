@@ -213,6 +213,11 @@
   .timer-row { display:flex; align-items:baseline; gap:8px; }
   .timer-label { font-size:0.8rem; color: var(--text-muted); }
   .timer-value { font-size: 2.1rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; }
+  .long-run-warning, .pm-overdue-warning {
+    font-size: 0.8rem; font-weight: 600; color: var(--red-strong);
+    background: rgba(220,38,38,0.1); border: 1px solid rgba(220,38,38,0.3);
+    border-radius: var(--radius-sm); padding: 6px 10px; margin-top: 8px;
+  }
   .cumulative-row { display:flex; align-items:baseline; gap:8px; padding-top:2px; border-top: 1px dashed var(--glass-border); padding-top:10px;}
   .cumulative-value { font-size: 1.3rem; font-weight: 700; color: var(--accent-strong); font-variant-numeric: tabular-nums; }
   .cumulative-days { font-size: 0.82rem; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-left: 4px; }
