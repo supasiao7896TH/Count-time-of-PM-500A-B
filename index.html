@@ -553,11 +553,64 @@
       </div>
       <div class="field">
         <label for="fResetPe501">B/V bypass PE-501 (เปิดกี่รอบ)</label>
-        <input type="number" id="fResetPe501" min="0" step="1" required>
+        <select id="fResetPe501" required>
+          <option value="0">0</option>
+          <option value="0.25">1/4 รอบ</option>
+          <option value="0.5">1/2 รอบ</option>
+          <option value="0.75">3/4 รอบ</option>
+          <option value="1">1 รอบ</option>
+          <option value="1.25">1 1/4 รอบ</option>
+          <option value="1.5">1 1/2 รอบ</option>
+          <option value="1.75">1 3/4 รอบ</option>
+          <option value="2">2 รอบ</option>
+          <option value="2.25">2 1/4 รอบ</option>
+          <option value="2.5">2 1/2 รอบ</option>
+          <option value="2.75">2 3/4 รอบ</option>
+          <option value="3">3 รอบ</option>
+          <option value="3.25">3 1/4 รอบ</option>
+          <option value="3.5">3 1/2 รอบ</option>
+          <option value="3.75">3 3/4 รอบ</option>
+          <option value="4">4 รอบ</option>
+          <option value="4.25">4 1/4 รอบ</option>
+          <option value="4.5">4 1/2 รอบ</option>
+          <option value="4.75">4 3/4 รอบ</option>
+          <option value="5">5 รอบ</option>
+        </select>
       </div>
       <div class="field">
         <label for="fResetLcv2502">B/V bypass LCV-2502 (เปิดกี่รอบ)</label>
-        <input type="number" id="fResetLcv2502" min="0" step="1" required>
+        <select id="fResetLcv2502" required>
+          <option value="0">0</option>
+          <option value="0.25">1/4 รอบ</option>
+          <option value="0.5">1/2 รอบ</option>
+          <option value="0.75">3/4 รอบ</option>
+          <option value="1">1 รอบ</option>
+          <option value="1.25">1 1/4 รอบ</option>
+          <option value="1.5">1 1/2 รอบ</option>
+          <option value="1.75">1 3/4 รอบ</option>
+          <option value="2">2 รอบ</option>
+          <option value="2.25">2 1/4 รอบ</option>
+          <option value="2.5">2 1/2 รอบ</option>
+          <option value="2.75">2 3/4 รอบ</option>
+          <option value="3">3 รอบ</option>
+          <option value="3.25">3 1/4 รอบ</option>
+          <option value="3.5">3 1/2 รอบ</option>
+          <option value="3.75">3 3/4 รอบ</option>
+          <option value="4">4 รอบ</option>
+          <option value="4.25">4 1/4 รอบ</option>
+          <option value="4.5">4 1/2 รอบ</option>
+          <option value="4.75">4 3/4 รอบ</option>
+          <option value="5">5 รอบ</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="fResetNoteSelect">หมายเหตุที่ใช้บ่อย</label>
+        <select id="fResetNoteSelect">
+          <option value="">-- เลือก (หรือพิมพ์เองด้านล่าง) --</option>
+          <option value="รีเซ็ตตามรอบ PM ปกติ">รีเซ็ตตามรอบ PM ปกติ</option>
+          <option value="เปลี่ยนไส้กรอง">เปลี่ยนไส้กรอง</option>
+          <option value="ค่า PD สูงกว่าปกติ (ต้องเปิด bypass บ่อย)">ค่า PD สูงกว่าปกติ (ต้องเปิด bypass บ่อย)</option>
+        </select>
       </div>
       <div class="field">
         <label for="fResetNote">หมายเหตุ</label>

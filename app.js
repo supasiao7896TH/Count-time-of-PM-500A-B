@@ -1180,6 +1180,9 @@ const APP_CORE = (() => {
 
     document.getElementById('resetModalCancelBtn').addEventListener('click', closeResetModal);
     document.getElementById('resetForm').addEventListener('submit', handleResetFormSubmit);
+    document.getElementById('fResetNoteSelect').addEventListener('change', (evt) => {
+      if (evt.target.value) document.getElementById('fResetNote').value = evt.target.value;
+    });
 
     document.getElementById('filterModalCancelBtn').addEventListener('click', closeFilterModal);
     document.getElementById('filterForm').addEventListener('submit', handleFilterFormSubmit);
@@ -1300,11 +1303,11 @@ const APP_CORE = (() => {
 
     if (pe501Val === '') { errorEl.textContent = 'กรุณาระบุจำนวนรอบที่เปิด B/V bypass PE-501'; return; }
     const pe501OpenCount = Number(pe501Val);
-    if (!Number.isInteger(pe501OpenCount) || pe501OpenCount < 0) { errorEl.textContent = 'B/V bypass PE-501 ต้องเป็นจำนวนเต็มไม่ติดลบ'; return; }
+    if (!Number.isFinite(pe501OpenCount) || pe501OpenCount < 0) { errorEl.textContent = 'B/V bypass PE-501 ต้องเป็นตัวเลขไม่ติดลบ'; return; }
 
     if (lcv2502Val === '') { errorEl.textContent = 'กรุณาระบุจำนวนรอบที่เปิด B/V bypass LCV-2502'; return; }
     const lcv2502OpenCount = Number(lcv2502Val);
-    if (!Number.isInteger(lcv2502OpenCount) || lcv2502OpenCount < 0) { errorEl.textContent = 'B/V bypass LCV-2502 ต้องเป็นจำนวนเต็มไม่ติดลบ'; return; }
+    if (!Number.isFinite(lcv2502OpenCount) || lcv2502OpenCount < 0) { errorEl.textContent = 'B/V bypass LCV-2502 ต้องเป็นตัวเลขไม่ติดลบ'; return; }
 
     if (!note) { errorEl.textContent = 'กรุณาระบุหมายเหตุ'; return; }
 
