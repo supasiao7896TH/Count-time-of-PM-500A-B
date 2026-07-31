@@ -412,69 +412,45 @@ const STORAGE_ENGINE = (() => {
     return { sec, pmTargetDays };
   }
 
-  // Bucket a single unit's sessions onto their startTime's day (same convention
-  // as getDailyAggregates), counting only the portion of duration after the
-  // unit's last reset (or all-time if never reset). Returns the day-key the
-  // current cycle started on, plus per-day duration buckets in seconds.
-  async function getUnitCycleSeries(equipment) {
-    const [sessions, resetRec] = await Promise.all([
-      getSessionsByEquipment(equipment), getReset(equipment),
+  // One entry per completed cycle (from resetHistory, already carrying the
+  // exact hours accumulated in that cycle) plus one trailing entry for the
+  // still-open current cycle (live from getCumulativeSince) — a "cycle" here
+  // is the span from the previous reset (or first-ever use) to a reset.
+  async function getCycleUsageSeries(equipment) {
+    const [resetRec, liveSec] = await Promise.all([
+      getReset(equipment), getCumulativeSince(equipment),
     ]);
-    const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
-    const buckets = {};
-    for (const s of sessions) {
-      const start = new Date(s.startTime).getTime();
-      const end = effectiveEnd(s).getTime();
-      if (resetAt != null && end <= resetAt) continue;
-      const effStart = resetAt != null && start < resetAt ? resetAt : start;
-      const durSec = Math.max(0, (end - effStart) / 1000);
-      if (durSec <= 0) continue;
-      const key = APP_CONFIG.dayKey(s.startTime);
-      buckets[key] = (buckets[key] || 0) + durSec;
+    const history = (resetRec && resetRec.resetHistory) || [];
+    const entries = history.map((h) => ({
+      label: APP_CONFIG.formatDayKeyBE(APP_CONFIG.dayKey(h.ts)),
+      hours: h.hoursAtReset,
+      ongoing: false,
+      note: h.note || '',
+    }));
+    if (liveSec > 0 || entries.length === 0) {
+      entries.push({ label: 'ปัจจุบัน', hours: liveSec / 3600, ongoing: true, note: '' });
     }
-    let startKey;
-    if (resetAt != null) {
-      startKey = APP_CONFIG.dayKey(resetAt);
-    } else {
-      const keys = Object.keys(buckets);
-      if (!keys.length) return null;
-      startKey = keys.sort()[0];
-    }
-    return { startKey, buckets };
+    return entries.length ? entries : [];
   }
 
-  // Merges A and B's current-cycle series onto one shared day axis (from
-  // whichever cycle started earliest, through today) as running cumulative
-  // days — the same metric that drives the tank fill level, plotted per day.
-  async function getCurrentCycleTrend() {
-    const [a, b] = await Promise.all([getUnitCycleSeries('A'), getUnitCycleSeries('B')]);
-    if (!a && !b) return [];
-    const todayKey = APP_CONFIG.dayKey(new Date());
-    const rangeStartKey = [a && a.startKey, b && b.startKey].filter(Boolean).sort()[0];
-    const dayKeys = [];
-    let cursor = new Date(rangeStartKey + 'T00:00:00Z');
-    const endCursor = new Date(todayKey + 'T00:00:00Z');
-    while (cursor.getTime() <= endCursor.getTime()) {
-      dayKeys.push(APP_CONFIG.dayKey(cursor));
-      cursor = new Date(cursor.getTime() + 86400000);
+  // Pairs A's and B's cycle-usage entries by sequence (1st cycle vs 1st
+  // cycle, 2nd vs 2nd, ...) rather than by calendar date, since the two
+  // units get reset independently and their cycle boundaries don't line up.
+  async function getCycleUsageTrend() {
+    const [a, b] = await Promise.all([getCycleUsageSeries('A'), getCycleUsageSeries('B')]);
+    const maxLen = Math.max(a.length, b.length);
+    const groups = [];
+    for (let i = 0; i < maxLen; i++) {
+      groups.push({ index: i + 1, A: a[i] || null, B: b[i] || null });
     }
-    let cumA = 0, cumB = 0;
-    return dayKeys.map((key) => {
-      if (a && key >= a.startKey) cumA += (a.buckets[key] || 0);
-      if (b && key >= b.startKey) cumB += (b.buckets[key] || 0);
-      return {
-        key, label: APP_CONFIG.formatDayKeyBE(key),
-        A: (a && key >= a.startKey) ? cumA / 86400 : null,
-        B: (b && key >= b.startKey) ? cumB / 86400 : null,
-      };
-    });
+    return groups;
   }
 
   return {
     open, addSession, updateSession, deleteSession, getSessionById,
     getSessionsByEquipment, getAllSessions, getOpenSessionsFor, startSessionAtomic,
     getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
-    getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCurrentCycleTrend,
+    getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCycleUsageTrend,
   };
 })();
 
@@ -763,10 +739,10 @@ const UI_RENDERER = (() => {
     return niceResidual * magnitude;
   }
 
-  function renderTrendChart(rows) {
+  function renderTrendChart(groups) {
     const host = document.getElementById('trendChartHost');
     host.innerHTML = '';
-    if (!rows.length) {
+    if (!groups.length) {
       const empty = document.createElement('div');
       empty.className = 'chart-empty';
       empty.textContent = 'ยังไม่มีข้อมูลเพียงพอสำหรับกราฟ';
@@ -779,18 +755,19 @@ const UI_RENDERER = (() => {
     const padLeft = 34, padRight = 10, padTop = 10, padBottom = 28;
     const plotW = width - padLeft - padRight;
     const plotH = height - padTop - padBottom;
-    const maxDays = niceCeil(Math.max(1, ...rows.map((r) => Math.max(r.A || 0, r.B || 0))));
+    const allHours = groups.flatMap((g) => [g.A && g.A.hours, g.B && g.B.hours]).filter((v) => v != null);
+    const maxHours = niceCeil(Math.max(1, ...allHours));
 
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('id', 'trendChart');
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', 'กราฟชั่วโมงสะสมตั้งแต่รีเซ็ตล่าสุด เปรียบเทียบ PM-500A กับ PM-500B');
+    svg.setAttribute('aria-label', 'กราฟแท่งชั่วโมงใช้งานต่อรอบ เปรียบเทียบ PM-500A กับ PM-500B');
 
     const steps = 4;
     for (let i = 0; i <= steps; i++) {
-      const val = (maxDays / steps) * i;
-      const y = padTop + plotH - (val / maxDays) * plotH;
+      const val = (maxHours / steps) * i;
+      const y = padTop + plotH - (val / maxHours) * plotH;
       const line = document.createElementNS(svgNS, 'line');
       line.setAttribute('x1', padLeft); line.setAttribute('x2', width - padRight);
       line.setAttribute('y1', y); line.setAttribute('y2', y);
@@ -805,45 +782,42 @@ const UI_RENDERER = (() => {
       svg.appendChild(text);
     }
 
-    const stepX = rows.length > 1 ? plotW / (rows.length - 1) : 0;
-    const xAt = (i) => padLeft + i * stepX;
-    const yAt = (val) => padTop + plotH - (val / maxDays) * plotH;
-    const labelEvery = Math.max(1, Math.ceil(rows.length / 8));
+    const slotW = plotW / groups.length;
+    const barW = slotW * 0.32;
+    const barGap = slotW * 0.06;
+    const heightAt = (hours) => (hours / maxHours) * plotH;
+    const labelEvery = Math.max(1, Math.ceil(groups.length / 8));
 
-    function drawSeries(field, lineClass, dotClass, unitLabel) {
-      const points = [];
-      rows.forEach((row, i) => {
-        if (row[field] == null) return;
-        points.push({ i, x: xAt(i), y: yAt(row[field]), row });
-      });
-      if (points.length >= 2) {
-        const polyline = document.createElementNS(svgNS, 'polyline');
-        polyline.setAttribute('points', points.map((p) => `${p.x},${p.y}`).join(' '));
-        polyline.setAttribute('class', lineClass);
-        svg.appendChild(polyline);
-      }
-      points.forEach((p) => {
-        const dot = document.createElementNS(svgNS, 'circle');
-        dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y); dot.setAttribute('r', 3);
-        dot.setAttribute('class', dotClass);
-        const title = document.createElementNS(svgNS, 'title');
-        title.textContent = `${unitLabel} · ${p.row.label}: ${p.row[field].toFixed(1)} วัน สะสม`;
-        dot.appendChild(title);
-        svg.appendChild(dot);
-      });
+    function drawBar(x, entry, barClass, unitLabel, groupIndex) {
+      if (!entry) return;
+      const h = entry.hours > 0 ? Math.max(1.5, heightAt(entry.hours)) : 0;
+      const y = padTop + plotH - h;
+      const rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', x); rect.setAttribute('y', y);
+      rect.setAttribute('width', barW); rect.setAttribute('height', h);
+      rect.setAttribute('class', entry.ongoing ? `${barClass} bar-ongoing` : barClass);
+      const statusText = entry.ongoing ? 'ยังไม่จบรอบ (นับถึงตอนนี้)' : entry.label;
+      const noteText = entry.note ? ` · หมายเหตุ: ${entry.note}` : '';
+      const title = document.createElementNS(svgNS, 'title');
+      title.textContent = `${unitLabel} · รอบที่ ${groupIndex} · ${statusText}: ${entry.hours.toFixed(1)} ชม.${noteText}`;
+      rect.appendChild(title);
+      svg.appendChild(rect);
     }
 
-    drawSeries('A', 'line-a', 'dot-a', 'PM-500A');
-    drawSeries('B', 'line-b', 'dot-b', 'PM-500B');
+    groups.forEach((group, i) => {
+      const slotX = padLeft + i * slotW;
+      const pairW = barW * 2 + barGap;
+      const startX = slotX + (slotW - pairW) / 2;
+      drawBar(startX, group.A, 'bar-a', 'PM-500A', group.index);
+      drawBar(startX + barW + barGap, group.B, 'bar-b', 'PM-500B', group.index);
 
-    rows.forEach((row, i) => {
-      if (i % labelEvery !== 0 && i !== rows.length - 1) return;
+      if (i % labelEvery !== 0 && i !== groups.length - 1) return;
       const label = document.createElementNS(svgNS, 'text');
-      label.setAttribute('x', xAt(i));
+      label.setAttribute('x', slotX + slotW / 2);
       label.setAttribute('y', height - 8);
       label.setAttribute('text-anchor', 'middle');
       label.setAttribute('class', 'chart-axis-text');
-      label.textContent = row.label.slice(0, 5);
+      label.textContent = `รอบ ${group.index}`;
       svg.appendChild(label);
     });
 
@@ -1168,8 +1142,8 @@ const APP_CORE = (() => {
   }
 
   async function refreshTrendChart() {
-    const rows = await STORAGE_ENGINE.getCurrentCycleTrend();
-    UI_RENDERER.renderTrendChart(rows);
+    const groups = await STORAGE_ENGINE.getCycleUsageTrend();
+    UI_RENDERER.renderTrendChart(groups);
   }
 
   async function refreshResetInfo() {
