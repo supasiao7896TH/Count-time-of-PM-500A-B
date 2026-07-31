@@ -433,11 +433,19 @@ const STORAGE_ENGINE = (() => {
 
   // Exact sum of running time since the unit's last reset (or all-time if
   // never reset), clipping any session that straddles the reset boundary.
-  function sumSessionsSinceReset(sessions, resetAt) {
+  // `untilAt` (optional) caps the window at an arbitrary point instead of
+  // "now" — sessions starting after it are excluded, sessions ending after
+  // it are clipped at it. Used to compute the exact cumulative total as of
+  // a backdated reset time.
+  function sumSessionsSinceReset(sessions, resetAt, untilAt) {
     let sum = 0;
     for (const s of sessions) {
       const start = new Date(s.startTime).getTime();
-      const end = effectiveEnd(s).getTime();
+      let end = effectiveEnd(s).getTime();
+      if (untilAt != null) {
+        if (start >= untilAt) continue;
+        end = Math.min(end, untilAt);
+      }
       if (resetAt != null && end <= resetAt) continue;
       const effStart = resetAt != null && start < resetAt ? resetAt : start;
       sum += Math.max(0, (end - effStart) / 1000);
@@ -452,6 +460,18 @@ const STORAGE_ENGINE = (() => {
     ]);
     const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
     return sumSessionsSinceReset(sessions, resetAt);
+  }
+
+  // Same as getCumulativeSince but capped at an arbitrary past timestamp
+  // instead of "now" — used for backdated resets.
+  async function getCumulativeSinceUntil(equipment, untilISO) {
+    const [sessions, resetRec] = await Promise.all([
+      getSessionsByEquipment(equipment),
+      getReset(equipment),
+    ]);
+    const resetAt = resetRec && resetRec.lastResetAt ? new Date(resetRec.lastResetAt).getTime() : null;
+    const untilAt = new Date(untilISO).getTime();
+    return sumSessionsSinceReset(sessions, resetAt, untilAt);
   }
 
   // Fetches sessions + reset record once, returns both the exact cumulative
@@ -506,7 +526,7 @@ const STORAGE_ENGINE = (() => {
     open, addSession, updateSession, deleteSession, getSessionById,
     getSessionsByEquipment, getAllSessions, getOpenSessionsFor, startSessionAtomic,
     getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
-    getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCycleUsageTrend,
+    getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCumulativeSinceUntil, getCycleUsageTrend,
     addFilterChange, updateFilterChange, deleteFilterChange, getFilterChangeById,
     getFilterChangesByEquipment, getAllFilterChanges,
   };
@@ -957,7 +977,7 @@ const UI_RENDERER = (() => {
     if (!records.length) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 7; td.className = 'empty-state'; td.textContent = 'ยังไม่มีประวัติการรีเซ็ต';
+      td.colSpan = 8; td.className = 'empty-state'; td.textContent = 'ยังไม่มีประวัติการรีเซ็ต';
       tr.appendChild(td); tbody.appendChild(tr);
       return;
     }
@@ -967,6 +987,7 @@ const UI_RENDERER = (() => {
         APP_CONFIG.UNIT_LABEL[r.unit],
         APP_CONFIG.formatDateTimeBE(r.ts),
         r.hoursAtReset.toFixed(2),
+        APP_CONFIG.formatDays(r.hoursAtReset * 3600, 1),
         r.pd2500Pv != null ? String(r.pd2500Pv) : '—',
         r.pe501OpenCount != null ? String(r.pe501OpenCount) : '—',
         r.lcv2502OpenCount != null ? String(r.lcv2502OpenCount) : '—',
@@ -1038,8 +1059,8 @@ const UI_RENDERER = (() => {
     grid.appendChild(totalItem);
   }
 
-  function renderFilterHistoryTable(records) {
-    const tbody = document.querySelector('#filterHistoryTable tbody');
+  function renderFilterHistoryTable(records, tableId) {
+    const tbody = document.querySelector(`#${tableId || 'filterHistoryTable'} tbody`);
     tbody.innerHTML = '';
     if (!records.length) {
       const tr = document.createElement('tr');
@@ -1100,6 +1121,7 @@ const APP_CORE = (() => {
   'use strict';
 
   let editingSessionId = null;
+  let editingSessionWasOpen = false;
   let editingFilterChangeId = null;
   let filterChangeUnit = null;
   let pendingConfirmAction = null;
@@ -1200,6 +1222,7 @@ const APP_CORE = (() => {
     document.getElementById('filterModalCancelBtn').addEventListener('click', closeFilterModal);
     document.getElementById('filterForm').addEventListener('submit', handleFilterFormSubmit);
     document.querySelector('#filterHistoryTable tbody').addEventListener('click', handleFilterHistoryTableClick);
+    document.querySelector('#dashboardFilterHistoryTable tbody').addEventListener('click', handleFilterHistoryTableClick);
 
     document.getElementById('confirmModalCancelBtn').addEventListener('click', closeConfirmModal);
     document.getElementById('confirmModalOkBtn').addEventListener('click', handleConfirmOk);
@@ -1289,9 +1312,10 @@ const APP_CORE = (() => {
     resetModalUnit = unit;
     document.getElementById('resetModalTitle').textContent = `รีเซ็ตชั่วโมงสะสม PM-500${unit}`;
     document.getElementById('resetModalBody').textContent =
-      `การรีเซ็ตจะทำให้ตัวเลข "ชั่วโมงสะสม" ของ PM-500${unit} เริ่มนับใหม่จาก 0 ตั้งแต่ตอนนี้ ประวัติ Session ทั้งหมดจะยังคงถูกเก็บไว้ครบถ้วนและตรวจสอบย้อนหลังได้เสมอ กรุณาระบุค่าต่อไปนี้`;
+      `การรีเซ็ตจะทำให้ตัวเลข "ชั่วโมงสะสม" ของ PM-500${unit} เริ่มนับใหม่จาก 0 ตั้งแต่เวลาที่เลือกด้านล่าง ประวัติ Session ทั้งหมดจะยังคงถูกเก็บไว้ครบถ้วนและตรวจสอบย้อนหลังได้เสมอ กรุณาระบุค่าต่อไปนี้`;
     document.getElementById('resetForm').reset();
     document.getElementById('resetFormError').textContent = '';
+    document.getElementById('fResetDate').value = APP_CONFIG.isoToLocalInput(new Date().toISOString());
     UI_RENDERER.showModal('resetModalOverlay');
   }
 
@@ -1305,10 +1329,15 @@ const APP_CORE = (() => {
     const errorEl = document.getElementById('resetFormError');
     errorEl.textContent = '';
 
+    const resetDateLocal = document.getElementById('fResetDate').value;
     const pd2500Val = document.getElementById('fResetPd2500').value;
     const pe501Val = document.getElementById('fResetPe501').value;
     const lcv2502Val = document.getElementById('fResetLcv2502').value;
     const note = document.getElementById('fResetNote').value.trim();
+
+    if (!resetDateLocal) { errorEl.textContent = 'กรุณาระบุวันที่/เวลาที่จะรีเซ็ต'; return; }
+    const resetAtISO = APP_CONFIG.localInputToISO(resetDateLocal);
+    if (new Date(resetAtISO).getTime() > Date.now()) { errorEl.textContent = 'เวลาที่รีเซ็ตต้องไม่เป็นอนาคต'; return; }
 
     if (pd2500Val === '') { errorEl.textContent = 'กรุณาระบุค่า PD-2500.PV'; return; }
     const pd2500Pv = Number(pd2500Val);
@@ -1328,15 +1357,18 @@ const APP_CORE = (() => {
     const saveBtn = document.getElementById('resetModalSaveBtn');
     saveBtn.disabled = true;
     try {
-      const cumulativeSec = await STORAGE_ENGINE.getCumulativeSince(unit);
-      const now = new Date().toISOString();
       const existing = await STORAGE_ENGINE.getReset(unit);
+      if (existing && existing.lastResetAt && new Date(resetAtISO).getTime() <= new Date(existing.lastResetAt).getTime()) {
+        errorEl.textContent = 'เวลาที่รีเซ็ตต้องอยู่หลังการรีเซ็ตครั้งก่อน';
+        return;
+      }
+      const cumulativeSec = await STORAGE_ENGINE.getCumulativeSinceUntil(unit, resetAtISO);
       await STORAGE_ENGINE.saveReset({
         equipment: unit,
-        lastResetAt: now,
+        lastResetAt: resetAtISO,
         pmTargetDays: existing && existing.pmTargetDays,
         resetHistory: [...((existing && existing.resetHistory) || []), {
-          ts: now, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
+          ts: resetAtISO, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
           pd2500Pv, pe501OpenCount, lcv2502OpenCount,
         }],
       });
@@ -1463,13 +1495,15 @@ const APP_CORE = (() => {
     for (const s of summary) UI_RENDERER.updateFilterCount(s.unit, s.count);
 
     const sorted = [...all].sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt));
-    UI_RENDERER.renderFilterHistoryTable(sorted);
+    UI_RENDERER.renderFilterHistoryTable(sorted, 'filterHistoryTable');
+    UI_RENDERER.renderFilterHistoryTable(sorted.slice(0, 10), 'dashboardFilterHistoryTable');
   }
 
   /* ---- Session add / edit modal ---- */
 
   function openAddSessionModal() {
     editingSessionId = null;
+    editingSessionWasOpen = false;
     document.getElementById('sessionModalTitle').textContent = 'เพิ่ม Session ย้อนหลัง';
     document.getElementById('sessionForm').reset();
     document.getElementById('fEquipment').disabled = false;
@@ -1487,6 +1521,7 @@ const APP_CORE = (() => {
     const session = await STORAGE_ENGINE.getSessionById(id);
     if (!session) return;
     editingSessionId = id;
+    editingSessionWasOpen = !session.endTime;
     document.getElementById('sessionModalTitle').textContent = `แก้ไข Session — PM-500${session.equipment}`;
     document.getElementById('sessionFormError').textContent = '';
     document.getElementById('fEquipment').value = session.equipment;
@@ -1494,8 +1529,10 @@ const APP_CORE = (() => {
     document.getElementById('fStart').value = APP_CONFIG.isoToLocalInput(session.startTime);
     const isOpen = !session.endTime;
     document.getElementById('fEnd').value = isOpen ? '' : APP_CONFIG.isoToLocalInput(session.endTime);
-    document.getElementById('fEnd').disabled = isOpen;
-    document.getElementById('fEndHint').textContent = isOpen ? 'กำลังทำงาน (ยังไม่ปิด) — แก้ไขได้เฉพาะเวลาเริ่ม การปิด session ให้ใช้ปุ่มหยุดทำงาน' : '';
+    document.getElementById('fEnd').disabled = false;
+    document.getElementById('fEndHint').textContent = isOpen
+      ? 'กำลังทำงาน (ยังไม่ปิด) — เว้นว่างไว้เพื่อแก้ไขแค่เวลาเริ่ม หรือกรอกเวลาหยุดย้อนหลังเพื่อปิด session นี้'
+      : '';
     document.getElementById('fNote').value = '';
     document.getElementById('fNoteRequiredMark').textContent = '*';
     UI_RENDERER.showModal('sessionModalOverlay');
@@ -1515,7 +1552,7 @@ const APP_CORE = (() => {
     const startLocal = document.getElementById('fStart').value;
     const endLocal = document.getElementById('fEnd').value;
     const note = document.getElementById('fNote').value.trim();
-    const isEditingOpen = editingSessionId != null && document.getElementById('fEnd').disabled;
+    const isEditingOpen = editingSessionId != null && editingSessionWasOpen && !endLocal;
 
     if (!startLocal) { errorEl.textContent = 'กรุณาระบุเวลาเริ่ม'; return; }
     if (!isEditingOpen && !endLocal) { errorEl.textContent = 'กรุณาระบุเวลาหยุด'; return; }
@@ -1565,8 +1602,17 @@ const APP_CORE = (() => {
           }],
         });
         const st = STATE_STORE.get('unit' + equipment);
-        if (st.openSessionId === editingSessionId && !endISO) {
-          STATE_STORE.set('unit' + equipment, { ...st, startTime: startISO });
+        if (st.openSessionId === editingSessionId) {
+          if (!endISO) {
+            STATE_STORE.set('unit' + equipment, { ...st, startTime: startISO });
+          } else {
+            STATE_STORE.set('unit' + equipment, { status: 'stopped', openSessionId: null, startTime: null });
+            UI_RENDERER.setUnitStatus(equipment, 'stopped');
+            UI_RENDERER.updateTimer(equipment, 0);
+            if (durationSec > 24 * 3600) {
+              UI_RENDERER.toast(`PM-500${equipment}: ระยะเวลาทำงานนานผิดปกติ (เกิน 24 ชม.) กรุณาตรวจสอบ`, 'warn');
+            }
+          }
         }
         UI_RENDERER.toast('แก้ไข Session เรียบร้อยแล้ว');
       }

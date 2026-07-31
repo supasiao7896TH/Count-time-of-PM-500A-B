@@ -413,7 +413,7 @@
       </div>
       <div class="table-scroll">
         <table id="resetHistoryTable">
-          <thead><tr><th>เครื่อง</th><th>วันที่/เวลา</th><th>ชั่วโมงตอนรีเซ็ต</th><th>PD-2500.PV</th><th>PE-501 (รอบ)</th><th>LCV-2502 (รอบ)</th><th>หมายเหตุ</th></tr></thead>
+          <thead><tr><th>เครื่อง</th><th>วันที่/เวลา</th><th>ชั่วโมงตอนรีเซ็ต</th><th>จำนวนวัน</th><th>PD-2500.PV</th><th>PE-501 (รอบ)</th><th>LCV-2502 (รอบ)</th><th>หมายเหตุ</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -424,6 +424,18 @@
         แอปนี้นับเวลาทำงานของ PM-500A และ PM-500B แยกอิสระจากกัน โดยไม่เกี่ยวข้องกับปุ่มเลือก A/B บนหน้าจอ DCS —
         ใช้เพื่อติดตามชั่วโมงทำงานสะสมจริงของทั้งสองเครื่องเมื่อใช้งานพร้อมกัน สำหรับวางแผนงาน PM
       </p>
+    </div>
+
+    <div class="card">
+      <div class="section-title">
+        <h2>📋 ประวัติการเปลี่ยน Filter</h2>
+      </div>
+      <div class="table-scroll">
+        <table id="dashboardFilterHistoryTable">
+          <thead><tr><th>เครื่อง</th><th>วันที่เปลี่ยน</th><th>ค่าใช้จ่าย</th><th>หมายเหตุ</th><th>จัดการ</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -553,12 +565,18 @@
     <p id="resetModalBody" style="color:var(--text-muted); font-size:0.9rem;"></p>
     <form id="resetForm">
       <div class="field">
+        <label for="fResetDate">วันที่/เวลาที่จะรีเซ็ต</label>
+        <input type="datetime-local" id="fResetDate" step="1" required>
+        <span class="field-hint">ค่าเริ่มต้นคือตอนนี้ เปลี่ยนเป็นวันเวลาในอดีตได้ถ้าลืมกดรีเซ็ตตอนนั้น</span>
+      </div>
+      <div class="field">
         <label for="fResetPd2500">ค่า PD-2500.PV</label>
         <input type="number" id="fResetPd2500" step="0.01" required>
       </div>
       <div class="field">
         <label for="fResetPe501">B/V bypass PE-501 (เปิดกี่รอบ)</label>
-        <select id="fResetPe501" required>
+        <input type="number" id="fResetPe501" list="pe501Options" min="0" step="0.01" value="0" required>
+        <datalist id="pe501Options">
           <option value="0">0</option>
           <option value="0.25">1/4 รอบ</option>
           <option value="0.5">1/2 รอบ</option>
@@ -580,11 +598,12 @@
           <option value="4.5">4 1/2 รอบ</option>
           <option value="4.75">4 3/4 รอบ</option>
           <option value="5">5 รอบ</option>
-        </select>
+        </datalist>
       </div>
       <div class="field">
         <label for="fResetLcv2502">B/V bypass LCV-2502 (เปิดกี่รอบ)</label>
-        <select id="fResetLcv2502" required>
+        <input type="number" id="fResetLcv2502" list="lcv2502Options" min="0" step="0.01" value="0" required>
+        <datalist id="lcv2502Options">
           <option value="0">0</option>
           <option value="0.25">1/4 รอบ</option>
           <option value="0.5">1/2 รอบ</option>
@@ -606,7 +625,7 @@
           <option value="4.5">4 1/2 รอบ</option>
           <option value="4.75">4 3/4 รอบ</option>
           <option value="5">5 รอบ</option>
-        </select>
+        </datalist>
       </div>
       <div class="field">
         <label for="fResetNoteSelect">หมายเหตุที่ใช้บ่อย</label>
