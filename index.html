@@ -213,9 +213,14 @@
   .timer-row { display:flex; align-items:baseline; gap:8px; }
   .timer-label { font-size:0.8rem; color: var(--text-muted); }
   .timer-value { font-size: 2.1rem; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; }
-  .long-run-warning, .pm-overdue-warning, .filter-overdue-warning {
+  .pm-overdue-warning, .filter-overdue-warning {
     font-size: 0.8rem; font-weight: 600; color: var(--red-strong);
     background: rgba(220,38,38,0.1); border: 1px solid rgba(220,38,38,0.3);
+    border-radius: var(--radius-sm); padding: 6px 10px; margin-top: 8px;
+  }
+  .filter-next-badge {
+    font-size: 0.8rem; font-weight: 600; color: var(--amber);
+    background: rgba(217,119,6,0.1); border: 1px solid rgba(217,119,6,0.3);
     border-radius: var(--radius-sm); padding: 6px 10px; margin-top: 8px;
   }
   .cumulative-row { display:flex; align-items:baseline; gap:8px; padding-top:2px; border-top: 1px dashed var(--glass-border); padding-top:10px;}
@@ -739,7 +744,6 @@
       <ul>
         <li>กด "▶ เริ่มทำงาน" เมื่อเริ่มเดินเครื่อง PM-500A/B — ตัวจับเวลาจะเริ่มนับทันที</li>
         <li>กด "⏹ หยุดทำงาน" เมื่อหยุดเดินเครื่อง ระบบจะบันทึกเป็น 1 Session ลงประวัติอัตโนมัติ</li>
-        <li>ถ้าเปิดเครื่องต่อเนื่องนานเกิน 12 ชม. การ์ดจะขึ้นป้ายเตือนสีแดง เผื่อกรณีลืมกดหยุด</li>
       </ul>
 
       <h4>ชั่วโมงสะสม / รีเซ็ต PM</h4>
@@ -760,6 +764,7 @@
       <ul>
         <li>กด "🧰 บันทึกเปลี่ยน Filter" ที่การ์ดของเครื่องนั้นทุกครั้งที่เปลี่ยน Filter จริง — ระบุค่าใช้จ่ายและหมายเหตุได้</li>
         <li>เมื่อชั่วโมงทำงานสะสมนับจากครั้งที่เปลี่ยนล่าสุด ถึงเป้าหมายที่ตั้งไว้ (แท็บ Filter) การ์ดจะขึ้นป้ายเตือน "ถึงกำหนดเปลี่ยน Filter แล้ว"</li>
+        <li>เครื่องที่มีชั่วโมงสะสม (นับจากรีเซ็ต PM ล่าสุด) มากกว่าอีกเครื่อง จะขึ้นป้าย "🔜 คาดว่าจะถึงคิวเปลี่ยน Filter รอบหน้า" ให้ล่วงหน้า</li>
         <li>ตั้งเป้าหมายชั่วโมงแยกได้ต่อเครื่องในแท็บ "Filter"</li>
       </ul>
 

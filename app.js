@@ -104,7 +104,6 @@ const APP_CONFIG = (() => {
   }
 
   const DEFAULT_PM_TARGET_DAYS = 30;
-  const LONG_RUN_WARNING_HOURS = 12;
   const DEFAULT_FILTER_TARGET_HOURS = 720;
 
   function pmProgressPercent(cumulativeSec, pmTargetDays) {
@@ -141,7 +140,7 @@ const APP_CONFIG = (() => {
     DB_NAME, DB_VERSION, STORE_SESSIONS, STORE_RESETS, STORE_FILTER_CHANGES, UNITS, UNIT_LABEL,
     pad2, bangkokParts, dayKey, formatDayKeyBE, formatMonthKeyBE,
     formatDateTimeBE, formatClock, formatHours, formatDays, formatBaht, localInputToISO, isoToLocalInput,
-    DEFAULT_PM_TARGET_DAYS, LONG_RUN_WARNING_HOURS, DEFAULT_FILTER_TARGET_HOURS, pmProgressPercent, pmFillColor,
+    DEFAULT_PM_TARGET_DAYS, DEFAULT_FILTER_TARGET_HOURS, pmProgressPercent, pmFillColor,
   };
 })();
 
@@ -637,15 +636,13 @@ const UI_RENDERER = (() => {
         </div>
         <div class="timer-row"><span class="timer-label">เวลาทำงาน (session ปัจจุบัน)</span></div>
         <div class="timer-value" id="timer-${unit}">00:00:00</div>
-        <div class="long-run-warning" id="longRunWarning-${unit}" style="display:none;">⚠️ ทำงานต่อเนื่องนานผิดปกติ (เกิน ${APP_CONFIG.LONG_RUN_WARNING_HOURS} ชม.) — ตรวจสอบว่าลืมกดหยุดทำงานหรือไม่</div>
         <div class="cumulative-row"><span class="timer-label">ชั่วโมงสะสม (ตั้งแต่รีเซ็ตล่าสุด)</span></div>
         <div>
           <span class="cumulative-value" id="cumulative-${unit}">0.0 ชม.</span>
           <span class="cumulative-days" id="cumulativeDays-${unit}">(≈ 0.0 วัน)</span>
         </div>
         <div class="unit-actions">
-          <button type="button" class="btn btn-start" id="startBtn-${unit}">▶ เริ่มทำงาน</button>
-          <button type="button" class="btn btn-stop" id="stopBtn-${unit}" style="display:none;">⏹ หยุดทำงาน</button>
+          <button type="button" class="btn btn-stop" id="toggleBtn-${unit}">▶ เริ่มทำงาน</button>
           <button type="button" class="btn btn-ghost" id="resetBtn-${unit}" title="รีเซ็ตชั่วโมงสะสม">รีเซ็ต</button>
         </div>
         <div class="filter-row">
@@ -653,6 +650,7 @@ const UI_RENDERER = (() => {
           <button type="button" class="btn-ghost btn" id="filterChangeBtn-${unit}">🧰 บันทึกเปลี่ยน Filter</button>
         </div>
         <div class="filter-overdue-warning" id="filterOverdueWarning-${unit}" style="display:none;">⚠️ ถึงกำหนดเปลี่ยน Filter แล้ว</div>
+        <div class="filter-next-badge" id="filterNextBadge-${unit}" style="display:none;">🔜 คาดว่าจะถึงคิวเปลี่ยน Filter รอบหน้า</div>
       </div>`;
   }
 
@@ -663,22 +661,21 @@ const UI_RENDERER = (() => {
   function setUnitStatus(unit, status) {
     const pill = document.getElementById(`statusPill-${unit}`);
     const text = document.getElementById(`statusText-${unit}`);
-    const startBtn = document.getElementById(`startBtn-${unit}`);
-    const stopBtn = document.getElementById(`stopBtn-${unit}`);
+    const toggleBtn = document.getElementById(`toggleBtn-${unit}`);
     const tank = document.getElementById(`tankVisual-${unit}`);
     if (tank) tank.classList.toggle('running', status === 'running');
     if (status === 'running') {
       pill.classList.add('running'); pill.classList.remove('stopped');
       text.textContent = 'กำลังทำงาน';
-      startBtn.style.display = 'none';
-      stopBtn.style.display = '';
-      stopBtn.disabled = false;
+      toggleBtn.classList.remove('btn-stop'); toggleBtn.classList.add('btn-start');
+      toggleBtn.textContent = '⏹ หยุดทำงาน';
+      toggleBtn.disabled = false;
     } else {
       pill.classList.remove('running'); pill.classList.add('stopped');
       text.textContent = 'หยุดทำงาน';
-      startBtn.style.display = '';
-      startBtn.disabled = false;
-      stopBtn.style.display = 'none';
+      toggleBtn.classList.remove('btn-start'); toggleBtn.classList.add('btn-stop');
+      toggleBtn.textContent = '▶ เริ่มทำงาน';
+      toggleBtn.disabled = false;
     }
   }
 
@@ -707,13 +704,13 @@ const UI_RENDERER = (() => {
     if (overdueEl) overdueEl.style.display = clamped >= 100 ? '' : 'none';
   }
 
-  function setLongRunWarning(unit, show) {
-    const el = document.getElementById(`longRunWarning-${unit}`);
+  function setFilterOverdueWarning(unit, show) {
+    const el = document.getElementById(`filterOverdueWarning-${unit}`);
     if (el) el.style.display = show ? '' : 'none';
   }
 
-  function setFilterOverdueWarning(unit, show) {
-    const el = document.getElementById(`filterOverdueWarning-${unit}`);
+  function setFilterNextBadge(unit, show) {
+    const el = document.getElementById(`filterNextBadge-${unit}`);
     if (el) el.style.display = show ? '' : 'none';
   }
 
@@ -1185,10 +1182,10 @@ const UI_RENDERER = (() => {
   }
 
   return {
-    initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, setLongRunWarning, toast,
+    initDashboard, setUnitStatus, updateTimer, updateCumulative, updateTankLevel, toast,
     showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportUnitButtons, setReportRangeCaption,
     renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo, renderResetHistoryTable,
-    updateFilterCount, renderFilterSummary, renderFilterHistoryTable, setFilterOverdueWarning,
+    updateFilterCount, renderFilterSummary, renderFilterHistoryTable, setFilterOverdueWarning, setFilterNextBadge,
   };
 })();
 
@@ -1275,9 +1272,6 @@ const APP_CORE = (() => {
         if (st.status === 'running') {
           const elapsedSec = (Date.now() - new Date(st.startTime).getTime()) / 1000;
           UI_RENDERER.updateTimer(unit, elapsedSec);
-          UI_RENDERER.setLongRunWarning(unit, elapsedSec > APP_CONFIG.LONG_RUN_WARNING_HOURS * 3600);
-        } else {
-          UI_RENDERER.setLongRunWarning(unit, false);
         }
       }
     }, 1000);
@@ -1289,8 +1283,10 @@ const APP_CORE = (() => {
 
   function wireStaticEvents() {
     for (const unit of APP_CONFIG.UNITS) {
-      document.getElementById(`startBtn-${unit}`).addEventListener('click', () => handleStart(unit));
-      document.getElementById(`stopBtn-${unit}`).addEventListener('click', () => handleStop(unit));
+      document.getElementById(`toggleBtn-${unit}`).addEventListener('click', () => {
+        const st = STATE_STORE.get('unit' + unit);
+        if (st.status === 'running') handleStop(unit); else handleStart(unit);
+      });
       document.getElementById(`resetBtn-${unit}`).addEventListener('click', () => openResetModal(unit));
       document.getElementById(`filterChangeBtn-${unit}`).addEventListener('click', () => openAddFilterChangeModal(unit));
     }
@@ -1355,10 +1351,10 @@ const APP_CORE = (() => {
   /* ---- Start / Stop ---- */
 
   async function handleStart(unit) {
-    const startBtn = document.getElementById(`startBtn-${unit}`);
+    const toggleBtn = document.getElementById(`toggleBtn-${unit}`);
     const st = STATE_STORE.get('unit' + unit);
     if (st.status === 'running') return;
-    startBtn.disabled = true;
+    toggleBtn.disabled = true;
     try {
       const { created, session } = await STORAGE_ENGINE.startSessionAtomic(unit);
       if (!created) {
@@ -1374,15 +1370,15 @@ const APP_CORE = (() => {
     } catch (err) {
       DEBUG_MODULE.log('error', 'APP_CORE.handleStart', err);
       UI_RENDERER.toast('บันทึกการเริ่มทำงานไม่สำเร็จ: ' + err.message, 'error');
-      startBtn.disabled = false;
+      toggleBtn.disabled = false;
     }
   }
 
   async function handleStop(unit) {
-    const stopBtn = document.getElementById(`stopBtn-${unit}`);
+    const toggleBtn = document.getElementById(`toggleBtn-${unit}`);
     const st = STATE_STORE.get('unit' + unit);
     if (st.status !== 'running') return;
-    stopBtn.disabled = true;
+    toggleBtn.disabled = true;
     try {
       const now = new Date().toISOString();
       const durationSec = Math.max(0, (new Date(now).getTime() - new Date(st.startTime).getTime()) / 1000);
@@ -1401,7 +1397,7 @@ const APP_CORE = (() => {
     } catch (err) {
       DEBUG_MODULE.log('error', 'APP_CORE.handleStop', err);
       UI_RENDERER.toast('บันทึกการหยุดทำงานไม่สำเร็จ: ' + err.message, 'error');
-      stopBtn.disabled = false;
+      toggleBtn.disabled = false;
     }
   }
 
@@ -1538,11 +1534,21 @@ const APP_CORE = (() => {
   /* ---- Cumulative / report refresh ---- */
 
   async function refreshCumulativeCards() {
+    const cumulativeSecByUnit = {};
     for (const unit of APP_CONFIG.UNITS) {
       const { sec, pmTargetDays } = await STORAGE_ENGINE.getCumulativeAndTarget(unit);
       UI_RENDERER.updateCumulative(unit, sec);
       UI_RENDERER.updateTankLevel(unit, APP_CONFIG.pmProgressPercent(sec, pmTargetDays));
+      cumulativeSecByUnit[unit] = sec;
     }
+
+    const maxSec = Math.max(...Object.values(cumulativeSecByUnit));
+    const unitsAtMax = APP_CONFIG.UNITS.filter((unit) => cumulativeSecByUnit[unit] === maxSec);
+    const nextUnit = unitsAtMax.length === 1 ? unitsAtMax[0] : null;
+    for (const unit of APP_CONFIG.UNITS) {
+      UI_RENDERER.setFilterNextBadge(unit, unit === nextUnit);
+    }
+
     await refreshFilterOverdueWarnings();
   }
 
