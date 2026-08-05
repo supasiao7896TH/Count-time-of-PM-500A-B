@@ -173,6 +173,7 @@ const STATE_STORE = (() => {
     activeView: localStorage.getItem('pm500_view') || 'dashboard',
     reportMode: 'daily',
     reportUnit: 'A',
+    syncStatus: 'offline',
   };
   const listeners = {};
 
@@ -234,10 +235,16 @@ const STORAGE_ENGINE = (() => {
     return db.transaction(storeName, mode).objectStore(storeName);
   }
 
+  // id is client-generated (UUID) rather than left to autoIncrement whenever
+  // the caller doesn't already supply one — this keeps ids globally unique
+  // across browser profiles/devices so CLOUD_SYNC_MANAGER can use the same
+  // id as the Firestore document id without collisions. IndexedDB accepts an
+  // explicit inline key even on an autoIncrement store as long as it's present.
   async function addSession(session) {
+    const record = session.id != null ? session : { ...session, id: crypto.randomUUID() };
     const store = await tx(APP_CONFIG.STORE_SESSIONS, 'readwrite');
-    const id = await reqToPromise(store.add(session));
-    return { ...session, id };
+    const id = await reqToPromise(store.add(record));
+    return { ...record, id };
   }
 
   async function updateSession(id, patch) {
@@ -289,6 +296,7 @@ const STORAGE_ENGINE = (() => {
     if (openSession) return { created: false, session: openSession };
     const now = new Date().toISOString();
     const session = {
+      id: crypto.randomUUID(),
       equipment, startTime: now, endTime: null, durationSec: null,
       isManualEntry: false, isEdited: false,
       auditLog: [{ ts: now, action: 'start' }],
@@ -310,9 +318,10 @@ const STORAGE_ENGINE = (() => {
   }
 
   async function addFilterChange(record) {
+    const full = record.id != null ? record : { ...record, id: crypto.randomUUID() };
     const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
-    const id = await reqToPromise(store.add(record));
-    return { ...record, id };
+    const id = await reqToPromise(store.add(full));
+    return { ...full, id };
   }
 
   async function updateFilterChange(id, patch) {
@@ -585,6 +594,309 @@ const STORAGE_ENGINE = (() => {
 })();
 
 /* ==========================================================================
+   AUTH_PROVIDER — Firebase anonymous auth (in-memory persistence, no login UI)
+   ========================================================================== */
+const AUTH_PROVIDER = (() => {
+  'use strict';
+
+  // Public web config — safe to embed in client code (this is how every
+  // Firebase web app ships it). Real access control lives in Firestore
+  // Security Rules, not in hiding this object.
+  const FIREBASE_CONFIG = {
+    apiKey: 'AIzaSyBr56MeNH5Md7Xan0bBXu1HzbErWTPKbro',
+    authDomain: 'radiosync-6662c.firebaseapp.com',
+    projectId: 'radiosync-6662c',
+    storageBucket: 'radiosync-6662c.firebasestorage.app',
+    messagingSenderId: '605359206228',
+    appId: '1:605359206228:web:bfbc3514675887d666e2c1',
+  };
+
+  let readyPromise = null;
+
+  // Anonymous sign-in with in-memory persistence: no visible login screen,
+  // and (per brand standard) never persisted to storage — a fresh anonymous
+  // identity every page load. Fine here because Firestore rules for this app
+  // gate on "signed in" only, not on which specific uid — data is shared
+  // equipment state, not per-user data.
+  function ensureReady() {
+    if (readyPromise) return readyPromise;
+    readyPromise = (async () => {
+      if (typeof firebase === 'undefined') throw new Error('Firebase SDK ไม่พร้อมใช้งาน (โหลดไม่สำเร็จ)');
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+      const auth = firebase.auth();
+      await auth.setPersistence(firebase.auth.Auth.Persistence.NONE);
+      if (auth.currentUser) return auth.currentUser;
+      const cred = await auth.signInAnonymously();
+      return cred.user;
+    })();
+    return readyPromise;
+  }
+
+  return { ensureReady };
+})();
+
+/* ==========================================================================
+   CLOUD_SYNC_MANAGER — mirrors STORAGE_ENGINE writes to Firestore and pulls
+   remote changes back into local IndexedDB, so data stays continuous across
+   different Windows logins/browser profiles on the same shared PC. Local
+   IndexedDB via STORAGE_ENGINE remains the source of truth for all reads —
+   this module only keeps it in sync with the shared cloud copy.
+   ========================================================================== */
+const CLOUD_SYNC_MANAGER = (() => {
+  'use strict';
+
+  const APP_ID = 'pm500-tracker';
+
+  let db = null;
+  let applyingRemote = false; // true while writing a remote change into local IndexedDB, to suppress echoing it straight back to Firestore
+  let onRemoteChangeCb = null;
+
+  function colRef(storeName) {
+    return db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection(storeName);
+  }
+
+  function setSyncStatus(status) {
+    STATE_STORE.set('syncStatus', status);
+    UI_RENDERER.setSyncStatus(status);
+  }
+
+  async function pushDoc(storeName, docId, data) {
+    if (applyingRemote || !db) return;
+    try {
+      setSyncStatus('syncing');
+      await colRef(storeName).doc(String(docId)).set(data);
+      setSyncStatus('synced');
+    } catch (err) {
+      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.push', err);
+      setSyncStatus('error');
+    }
+  }
+
+  async function pushDelete(storeName, docId) {
+    if (applyingRemote || !db) return;
+    try {
+      await colRef(storeName).doc(String(docId)).delete();
+    } catch (err) {
+      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.pushDelete', err);
+    }
+  }
+
+  // saveReset() is read-modify-write with an append-only resetHistory[] — a
+  // plain overwrite risks clobbering a concurrent reset from another device.
+  // This uses a real Firestore transaction (single-document read, fully
+  // supported/consistent) to merge histories instead of blindly overwriting.
+  async function mirrorReset(record) {
+    if (applyingRemote || !db) return;
+    const ref = colRef(APP_CONFIG.STORE_RESETS).doc(record.equipment);
+    try {
+      setSyncStatus('syncing');
+      await db.runTransaction(async (t) => {
+        const snap = await t.get(ref);
+        const remote = snap.exists ? snap.data() : null;
+        let history = record.resetHistory || [];
+        if (remote && Array.isArray(remote.resetHistory)) {
+          const seen = new Set(history.map((h) => h.ts));
+          for (const h of remote.resetHistory) {
+            if (!seen.has(h.ts)) { history = history.concat([h]); seen.add(h.ts); }
+          }
+          history.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+        }
+        t.set(ref, { ...record, resetHistory: history });
+      });
+      setSyncStatus('synced');
+    } catch (err) {
+      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.mirrorReset', err);
+      setSyncStatus('error');
+    }
+  }
+
+  // Best-effort cross-device guard for "เริ่มทำงาน": queries Firestore for an
+  // already-open session before creating a new one. Firestore transactions
+  // only guarantee consistency for single-document reads, not arbitrary
+  // queries, so this narrows but does not fully close the race window if two
+  // devices click start within the same instant — an accepted residual risk
+  // given this app's real usage pattern (sequential shift handover, not
+  // concurrent multi-operator clicking). The existing single-tab atomic guard
+  // in STORAGE_ENGINE.startSessionAtomic() still applies underneath.
+  async function tryStartSessionCloud(equipment) {
+    const snap = await colRef(APP_CONFIG.STORE_SESSIONS)
+      .where('equipment', '==', equipment).where('endTime', '==', null).limit(1).get();
+    if (!snap.empty) {
+      const remoteSession = snap.docs[0].data();
+      const local = await STORAGE_ENGINE.getSessionById(remoteSession.id);
+      applyingRemote = true;
+      try {
+        const adopted = local || await STORAGE_ENGINE.addSession(remoteSession);
+        return { created: false, session: adopted };
+      } finally { applyingRemote = false; }
+    }
+    const newId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const session = {
+      id: newId, equipment, startTime: now, endTime: null, durationSec: null,
+      isManualEntry: false, isEdited: false,
+      auditLog: [{ ts: now, action: 'start' }],
+      createdAt: now, updatedAt: now,
+    };
+    await colRef(APP_CONFIG.STORE_SESSIONS).doc(newId).set(session);
+    applyingRemote = true;
+    try { await STORAGE_ENGINE.addSession(session); }
+    finally { applyingRemote = false; }
+    return { created: true, session };
+  }
+
+  function wrapStorageEngine() {
+    const se = STORAGE_ENGINE;
+
+    const origAddSession = se.addSession;
+    se.addSession = async (session) => {
+      const result = await origAddSession(session);
+      pushDoc(APP_CONFIG.STORE_SESSIONS, result.id, result);
+      return result;
+    };
+
+    const origUpdateSession = se.updateSession;
+    se.updateSession = async (id, patch) => {
+      const result = await origUpdateSession(id, patch);
+      pushDoc(APP_CONFIG.STORE_SESSIONS, result.id, result);
+      return result;
+    };
+
+    const origDeleteSession = se.deleteSession;
+    se.deleteSession = async (id) => {
+      await origDeleteSession(id);
+      pushDelete(APP_CONFIG.STORE_SESSIONS, id);
+    };
+
+    const origStartSessionAtomic = se.startSessionAtomic;
+    se.startSessionAtomic = async (equipment) => {
+      if (db && !applyingRemote) {
+        try { return await tryStartSessionCloud(equipment); }
+        catch (err) { DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.startSessionAtomic', err); }
+      }
+      return origStartSessionAtomic(equipment);
+    };
+
+    const origSaveReset = se.saveReset;
+    se.saveReset = async (record) => {
+      const result = await origSaveReset(record);
+      mirrorReset(result);
+      return result;
+    };
+
+    const origAddFilterChange = se.addFilterChange;
+    se.addFilterChange = async (record) => {
+      const result = await origAddFilterChange(record);
+      pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, result.id, result);
+      return result;
+    };
+
+    const origUpdateFilterChange = se.updateFilterChange;
+    se.updateFilterChange = async (id, patch) => {
+      const result = await origUpdateFilterChange(id, patch);
+      pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, result.id, result);
+      return result;
+    };
+
+    const origDeleteFilterChange = se.deleteFilterChange;
+    se.deleteFilterChange = async (id) => {
+      await origDeleteFilterChange(id);
+      pushDelete(APP_CONFIG.STORE_FILTER_CHANGES, id);
+    };
+
+    // Settings → นำเข้าข้อมูล (.json): intentionally still mirrors to cloud —
+    // this is a deliberate "restore backup, replace everything" action the
+    // user already confirmed via confirmPhrase, and now that replace applies
+    // to the shared team dataset too (see confirm-phrase copy update).
+    const origImportAllData = se.importAllData;
+    se.importAllData = async (data) => {
+      await origImportAllData(data);
+      if (!db) return;
+      for (const s of (data.sessions || [])) pushDoc(APP_CONFIG.STORE_SESSIONS, s.id, s);
+      for (const r of (data.resets || [])) pushDoc(APP_CONFIG.STORE_RESETS, r.equipment, r);
+      for (const f of (data.filterChanges || [])) pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, f.id, f);
+    };
+
+    // clearAllData intentionally NOT wrapped/mirrored — it's the dev-only
+    // "clear test data" control; mirroring it would wipe every shift's
+    // shared cloud data from a local-only debug action. Stays local-only.
+  }
+
+  async function upsertLocal(storeName, data) {
+    if (storeName === APP_CONFIG.STORE_RESETS) {
+      await STORAGE_ENGINE.saveReset(data);
+    } else if (storeName === APP_CONFIG.STORE_SESSIONS) {
+      const existing = await STORAGE_ENGINE.getSessionById(data.id);
+      if (existing) await STORAGE_ENGINE.updateSession(data.id, data);
+      else await STORAGE_ENGINE.addSession(data);
+    } else if (storeName === APP_CONFIG.STORE_FILTER_CHANGES) {
+      const existing = await STORAGE_ENGINE.getFilterChangeById(data.id);
+      if (existing) await STORAGE_ENGINE.updateFilterChange(data.id, data);
+      else await STORAGE_ENGINE.addFilterChange(data);
+    }
+  }
+
+  async function deleteLocal(storeName, id) {
+    if (storeName === APP_CONFIG.STORE_SESSIONS) await STORAGE_ENGINE.deleteSession(id);
+    else if (storeName === APP_CONFIG.STORE_FILTER_CHANGES) await STORAGE_ENGINE.deleteFilterChange(id);
+  }
+
+  async function handleSnapshot(storeName, snapshot) {
+    let changed = false;
+    applyingRemote = true;
+    try {
+      for (const change of snapshot.docChanges()) {
+        if (change.type === 'removed') await deleteLocal(storeName, change.doc.id);
+        else await upsertLocal(storeName, change.doc.data());
+        changed = true;
+      }
+    } catch (err) {
+      DEBUG_MODULE.log('error', 'CLOUD_SYNC_MANAGER.handleSnapshot', err);
+    } finally {
+      applyingRemote = false;
+    }
+    if (changed && onRemoteChangeCb) {
+      try { await onRemoteChangeCb(); } catch (err) { DEBUG_MODULE.log('error', 'CLOUD_SYNC_MANAGER.onRemoteChange', err); }
+    }
+    setSyncStatus('synced');
+  }
+
+  function subscribeAll() {
+    const stores = [APP_CONFIG.STORE_SESSIONS, APP_CONFIG.STORE_RESETS, APP_CONFIG.STORE_FILTER_CHANGES];
+    for (const storeName of stores) {
+      colRef(storeName).onSnapshot(
+        (snap) => handleSnapshot(storeName, snap),
+        (err) => { DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.onSnapshot', err); setSyncStatus('error'); },
+      );
+    }
+  }
+
+  // Called once from APP_CORE.init(). Never throws — if Firebase/network is
+  // unreachable (e.g. blocked by plant IT, or offline), the app must keep
+  // working purely on local IndexedDB exactly as it did before this feature.
+  async function init(onRemoteChange) {
+    onRemoteChangeCb = onRemoteChange || null;
+    setSyncStatus('offline');
+    window.addEventListener('offline', () => setSyncStatus('offline'));
+    window.addEventListener('online', () => { if (db) setSyncStatus('synced'); });
+    if (!navigator.onLine) return;
+    try {
+      await AUTH_PROVIDER.ensureReady();
+      db = firebase.firestore();
+      wrapStorageEngine();
+      subscribeAll();
+      setSyncStatus('synced');
+    } catch (err) {
+      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.init', err);
+      db = null;
+      setSyncStatus('offline');
+    }
+  }
+
+  return { init };
+})();
+
+/* ==========================================================================
    ④ UI_RENDERER — pure DOM rendering; textContent only for dynamic data
    ========================================================================== */
 const UI_RENDERER = (() => {
@@ -725,6 +1037,16 @@ const UI_RENDERER = (() => {
 
   function showModal(id) { document.getElementById(id).classList.add('open'); }
   function hideModal(id) { document.getElementById(id).classList.remove('open'); }
+
+  const SYNC_STATUS_LABEL = { synced: 'ซิงค์แล้ว', syncing: 'กำลังซิงค์…', offline: 'ออฟไลน์ (บันทึกในเครื่อง)', error: 'ซิงค์ผิดพลาด' };
+
+  function setSyncStatus(status) {
+    const badge = document.getElementById('syncStatusBadge');
+    const text = document.getElementById('syncStatusText');
+    if (!badge || !text) return;
+    badge.className = 'sync-badge ' + status;
+    text.textContent = SYNC_STATUS_LABEL[status] || status;
+  }
 
   function setTheme(theme) {
     const root = document.documentElement;
@@ -1186,6 +1508,7 @@ const UI_RENDERER = (() => {
     showModal, hideModal, setTheme, setActiveView, setReportModeButtons, setReportUnitButtons, setReportRangeCaption,
     renderReportTable, renderHistoryTable, renderTrendChart, renderResetInfo, renderResetHistoryTable,
     updateFilterCount, renderFilterSummary, renderFilterHistoryTable, setFilterOverdueWarning, setFilterNextBadge,
+    setSyncStatus,
   };
 })();
 
@@ -1214,7 +1537,8 @@ const APP_CORE = (() => {
       UI_RENDERER.setActiveView(STATE_STORE.get('activeView'));
       UI_RENDERER.setReportModeButtons(STATE_STORE.get('reportMode'));
       UI_RENDERER.setReportUnitButtons(STATE_STORE.get('reportUnit'));
-      await Promise.all([refreshCumulativeCards(), refreshReport(), refreshHistory(), refreshTrendChart(), refreshResetInfo(), refreshResetHistory(), refreshFilterCounts(), refreshFilterChanges()]);
+      await CLOUD_SYNC_MANAGER.init(refreshAll);
+      await refreshAll();
       startTicker();
       registerServiceWorker();
     } catch (err) {
@@ -1263,6 +1587,32 @@ const APP_CORE = (() => {
         UI_RENDERER.setUnitStatus(unit, 'stopped');
       }
     }
+  }
+
+  // Re-derives each unit's running/stopped indicator from IndexedDB — unlike
+  // resumeOpenSessions() (load-time only, also auto-closes stray duplicates),
+  // this is safe to call repeatedly (e.g. after a remote change arrives from
+  // another device/login) since it has no destructive side effects.
+  async function syncUnitStatusFromStorage() {
+    for (const unit of APP_CONFIG.UNITS) {
+      const openSessions = await STORAGE_ENGINE.getOpenSessionsFor(unit);
+      if (openSessions.length) {
+        const session = openSessions[0];
+        STATE_STORE.set('unit' + unit, { status: 'running', openSessionId: session.id, startTime: session.startTime });
+        UI_RENDERER.setUnitStatus(unit, 'running');
+      } else {
+        STATE_STORE.set('unit' + unit, { status: 'stopped', openSessionId: null, startTime: null });
+        UI_RENDERER.setUnitStatus(unit, 'stopped');
+      }
+    }
+  }
+
+  // Re-renders every view from current IndexedDB state. Called once on init
+  // and again by CLOUD_SYNC_MANAGER whenever a remote change (from another
+  // device/login) lands, so the whole UI stays in sync without a full reload.
+  async function refreshAll() {
+    await syncUnitStatusFromStorage();
+    await Promise.all([refreshCumulativeCards(), refreshReport(), refreshHistory(), refreshTrendChart(), refreshResetInfo(), refreshResetHistory(), refreshFilterCounts(), refreshFilterChanges()]);
   }
 
   function startTicker() {
@@ -2028,7 +2378,8 @@ const APP_CORE = (() => {
       title: 'นำเข้าข้อมูล',
       body: `ไฟล์นี้มีประวัติ Session ${data.sessions.length} รายการ และประวัติเปลี่ยน Filter ${data.filterChanges.length} รายการ`
         + (data.exportedAt ? ` (ส่งออกเมื่อ ${APP_CONFIG.formatDateTimeBE(data.exportedAt)})` : '')
-        + ' การนำเข้าจะแทนที่ข้อมูลปัจจุบันทั้งหมดอย่างถาวร ไม่สามารถย้อนกลับได้',
+        + ' การนำเข้าจะแทนที่ข้อมูลปัจจุบันทั้งหมดอย่างถาวร ไม่สามารถย้อนกลับได้'
+        + (STATE_STORE.get('syncStatus') !== 'offline' ? ' — รวมถึงข้อมูลบน Cloud ที่ทุกกะ/ทุกเครื่องเห็นร่วมกันด้วย ไม่ใช่แค่เครื่องนี้' : ''),
       confirmPhrase: 'นำเข้าข้อมูล',
       onConfirm: async () => {
         await STORAGE_ENGINE.importAllData(data);

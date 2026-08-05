@@ -10,11 +10,11 @@
        Content-Security-Policy: frame-ancestors 'none' -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
-  script-src 'self';
+  script-src 'self' https://www.gstatic.com;
   style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
   font-src 'self' https://fonts.gstatic.com;
   img-src 'self' data:;
-  connect-src 'self';
+  connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com;
   base-uri 'self';
   form-action 'self';
 ">
@@ -148,6 +148,18 @@
   .status-pill.running { color: var(--green-strong); }
   .status-pill.stopped { color: var(--text-muted); }
   @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(22,163,74,0.35);} 70%{box-shadow:0 0 0 8px rgba(22,163,74,0);} 100%{box-shadow:0 0 0 0 rgba(22,163,74,0);} }
+
+  /* Cloud sync status badge — green=synced, amber=offline (local-only), blue=syncing, red=error */
+  .sync-badge { display:flex; align-items:center; gap:6px; font-size:0.78rem; font-weight:600; color:var(--text-muted); }
+  .sync-dot { width:8px; height:8px; border-radius:50%; background:#94a3b8; flex:0 0 auto; }
+  .sync-badge.synced .sync-dot { background: var(--green); }
+  .sync-badge.synced { color: var(--green-strong); }
+  .sync-badge.offline .sync-dot { background: var(--amber); }
+  .sync-badge.offline { color: var(--amber); }
+  .sync-badge.syncing .sync-dot { background:#2563eb; animation: pulse 1.2s infinite; }
+  .sync-badge.syncing { color:#2563eb; }
+  .sync-badge.error .sync-dot { background: var(--red); }
+  .sync-badge.error { color: var(--red-strong); }
 
   .tank-block { display:flex; flex-direction:column; align-items:center; gap:6px; }
   .tank-visual { display:flex; flex-direction:column; align-items:center; padding-top: 22px; padding-bottom: 38px; }
@@ -387,6 +399,9 @@
   <header class="app-header">
     <h1>⏱️ PM-500 Runtime Tracker</h1>
     <div class="header-right">
+      <span class="sync-badge offline" id="syncStatusBadge" title="สถานะซิงค์ข้อมูล Cloud">
+        <span class="sync-dot"></span><span id="syncStatusText">ออฟไลน์</span>
+      </span>
       <span id="todayLabel"></span>
       <button class="icon-btn" id="manualBtn" type="button" title="คู่มือการใช้งาน" aria-label="คู่มือการใช้งาน">📖</button>
       <button class="icon-btn" id="settingsBtn" type="button" title="ตั้งค่า" aria-label="ตั้งค่า">⚙️</button>
@@ -789,6 +804,12 @@
 
 <div id="toastHost" aria-live="polite"></div>
 
+<!-- Firebase compat SDK (classic scripts, no bundler/ES-module needed) — must
+     load before app.js, which uses the global `firebase` namespace directly
+     inside its AUTH_PROVIDER / CLOUD_SYNC_MANAGER modules. -->
+<script src="https://www.gstatic.com/firebasejs/11.6.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/11.6.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/11.6.0/firebase-firestore-compat.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
