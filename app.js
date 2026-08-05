@@ -645,14 +645,19 @@ const AUTH_PROVIDER = (() => {
 const CLOUD_SYNC_MANAGER = (() => {
   'use strict';
 
-  const APP_ID = 'pm500-tracker';
-
   let db = null;
   let applyingRemote = false; // true while writing a remote change into local IndexedDB, to suppress echoing it straight back to Firestore
   let onRemoteChangeCb = null;
 
+  // Flat, prefixed root-level collections (pm500_runtime_sessions,
+  // pm500_unit_resets, pm500_filter_changes) — this Firebase project is
+  // shared with another app (RadioSync) whose rules already claim the
+  // `artifacts/{appId}/public/data/{collection}` path pattern with
+  // collection-specific business logic that doesn't recognize PM-500's
+  // collection names, so writes there would be silently denied. A distinct
+  // top-level prefix keeps this app's data and rules fully independent.
   function colRef(storeName) {
-    return db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection(storeName);
+    return db.collection('pm500_' + storeName);
   }
 
   function setSyncStatus(status) {
