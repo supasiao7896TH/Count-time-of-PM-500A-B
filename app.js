@@ -686,6 +686,32 @@ const CLOUD_SYNC_MANAGER = (() => {
     }
   }
 
+  // Used only by the "clear test data" dev control, alongside
+  // STORAGE_ENGINE.clearAllData() — deletes every doc in all 3 collections so
+  // the shared cloud dataset actually goes away too (not just this device's
+  // local copy), otherwise the next onSnapshot delivers every doc back as
+  // 'added' and repopulates local IndexedDB. Batches in chunks of 500 (the
+  // Firestore batch write limit).
+  async function clearAllCloudData() {
+    if (!db) return { ok: false, reason: 'offline' };
+    const stores = [APP_CONFIG.STORE_SESSIONS, APP_CONFIG.STORE_RESETS, APP_CONFIG.STORE_FILTER_CHANGES];
+    try {
+      for (const storeName of stores) {
+        const snap = await colRef(storeName).get();
+        const docs = snap.docs;
+        for (let i = 0; i < docs.length; i += 500) {
+          const batch = db.batch();
+          for (const doc of docs.slice(i, i + 500)) batch.delete(doc.ref);
+          await batch.commit();
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.clearAllCloudData', err);
+      return { ok: false, reason: 'error' };
+    }
+  }
+
   // saveReset() is read-modify-write with an append-only resetHistory[] — a
   // plain overwrite risks clobbering a concurrent reset from another device.
   // This uses a real Firestore transaction (single-document read, fully
@@ -822,9 +848,10 @@ const CLOUD_SYNC_MANAGER = (() => {
       for (const f of (data.filterChanges || [])) pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, f.id, f);
     };
 
-    // clearAllData intentionally NOT wrapped/mirrored — it's the dev-only
-    // "clear test data" control; mirroring it would wipe every shift's
-    // shared cloud data from a local-only debug action. Stays local-only.
+    // clearAllData itself is intentionally not wrapped here — it's called
+    // paired with clearAllCloudData() directly from APP_CORE's confirm-modal
+    // handler instead, since the cloud wipe needs its own success/failure
+    // result surfaced to the user (see handleClearAllDataRequest).
   }
 
   async function upsertLocal(storeName, data) {
@@ -898,7 +925,7 @@ const CLOUD_SYNC_MANAGER = (() => {
     }
   }
 
-  return { init };
+  return { init, clearAllCloudData };
 })();
 
 /* ==========================================================================
@@ -2132,10 +2159,20 @@ const APP_CORE = (() => {
     }
   }
 
+  // dataset.id is always a string in the DOM. Sessions/filter changes created
+  // before Cloud Sync still use integer auto-increment keys in IndexedDB;
+  // ones created after use a crypto.randomUUID() string key (to match the
+  // Firestore doc id). IndexedDB keys compare by strict type, so a numeric-
+  // looking id must be converted back to Number or the lookup silently
+  // matches nothing.
+  function resolveRecordId(rawId) {
+    return /^\d+$/.test(rawId) ? Number(rawId) : rawId;
+  }
+
   function handleHistoryTableClick(evt) {
     const btn = evt.target.closest('button[data-action]');
     if (!btn) return;
-    const id = Number(btn.dataset.id);
+    const id = resolveRecordId(btn.dataset.id);
     if (btn.dataset.action === 'edit') {
       openEditSessionModal(id);
     } else if (btn.dataset.action === 'delete') {
@@ -2231,7 +2268,7 @@ const APP_CORE = (() => {
   function handleFilterHistoryTableClick(evt) {
     const btn = evt.target.closest('button[data-action]');
     if (!btn) return;
-    const id = Number(btn.dataset.id);
+    const id = resolveRecordId(btn.dataset.id);
     if (btn.dataset.action === 'edit') {
       openEditFilterChangeModal(id);
     } else if (btn.dataset.action === 'delete') {
@@ -2258,17 +2295,22 @@ const APP_CORE = (() => {
     }
     openConfirmModal({
       title: 'ลบข้อมูลทดสอบทั้งหมด',
-      body: 'การลบนี้จะลบประวัติ Session, ประวัติการรีเซ็ต และประวัติการเปลี่ยน Filter ของทั้ง PM-500A และ PM-500B ทั้งหมดอย่างถาวร ไม่สามารถกู้คืนได้ ใช้เฉพาะก่อนเริ่มใช้งานจริงเท่านั้น',
+      body: 'การลบนี้จะลบประวัติ Session, ประวัติการรีเซ็ต และประวัติการเปลี่ยน Filter ของทั้ง PM-500A และ PM-500B ทั้งหมดอย่างถาวร ทั้งข้อมูลในเครื่องนี้และข้อมูลบน Cloud ที่แชร์กับทุกเครื่อง/ทุกกะที่ sync อยู่ด้วย ไม่สามารถกู้คืนได้ ใช้เฉพาะก่อนเริ่มใช้งานจริงเท่านั้น',
       confirmPhrase: 'ลบทั้งหมด',
       onConfirm: async () => {
         await STORAGE_ENGINE.clearAllData();
+        const cloudResult = await CLOUD_SYNC_MANAGER.clearAllCloudData();
         for (const unit of APP_CONFIG.UNITS) {
           STATE_STORE.set('unit' + unit, { status: 'stopped', openSessionId: null, startTime: null });
           UI_RENDERER.setUnitStatus(unit, 'stopped');
           UI_RENDERER.updateTimer(unit, 0);
         }
         await Promise.all([refreshHistory(), refreshReport(), refreshCumulativeCards(), refreshTrendChart(), refreshFilterCounts(), refreshFilterChanges()]);
-        UI_RENDERER.toast('ลบข้อมูลทดสอบทั้งหมดเรียบร้อยแล้ว เริ่มนับใหม่จาก 0');
+        if (cloudResult.ok) {
+          UI_RENDERER.toast('ลบข้อมูลทดสอบทั้งหมดเรียบร้อยแล้ว (ทั้งเครื่องนี้และ Cloud) เริ่มนับใหม่จาก 0');
+        } else {
+          UI_RENDERER.toast('ลบข้อมูลในเครื่องนี้แล้ว แต่ลบบน Cloud ไม่สำเร็จ (ออฟไลน์/เชื่อมต่อไม่ได้) — ข้อมูลอาจกลับมาเมื่อออนไลน์อีกครั้ง กรุณาลองกดซ้ำตอนมีเน็ต', 'warn');
+        }
       },
     });
   }
