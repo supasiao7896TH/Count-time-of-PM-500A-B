@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - ชื่อแอป: PM-500 Runtime Tracker
 - Stack: Single-page vanilla HTML/CSS/JS · IndexedDB (`pm500_tracker_db`, `DB_VERSION = 2`) · ไม่มี build step, ไม่มี package.json/node_modules
-- Deploy: GitHub (`supasiao7896TH/Count-time-of-PM-500A-B`), branch `main`, เปิดผ่าน static server ใดก็ได้ (GitHub Pages / local http.server)
+- Deploy: GitHub (`supasiao7896TH/Count-time-of-PM-500A-B`), branch `main` — production จริงคือ **Cloudflare Worker** `count-time-of-pm-500a-b.supasiao.workers.dev` (ดูรายละเอียดสำคัญที่หัวข้อ Deploy ใน Commands ด้านล่าง — **ไม่ใช่ GitHub Pages**) เปิดทดสอบ local ผ่าน static server ใดก็ได้ (เช่น local http.server)
 - ผู้ใช้งาน: เจ้าหน้าที่กะเดินเครื่อง PTA plant ติดตามชั่วโมงทำงานของหน่วย PM-500A/B
 
 ## Commands
 
 - **รันแอป local**: ไม่มี build step — แต่ **ห้ามเปิดผ่าน `file://` ตรงๆ** เพราะฟีเจอร์ "ส่งออกสำเนาแอปแบบ Standalone" (`APP_CORE.handleExportStandaloneHtml`, `app.js` ~บรรทัด 2167) ใช้ `fetch('index.html')`/`fetch('app.js')` โหลดตัวเอง ซึ่ง `fetch()` ใช้ไม่ได้กับ `file://` ต้องรันผ่าน static server เช่น `python -m http.server` ที่ root repo แล้วเปิด `http://localhost:8000`
 - **Test / Lint**: ไม่มี test suite, ไม่มี lint config, ไม่มี CI/CD ในโปรเจกต์นี้ — ตรวจสอบด้วยการรันจริงในเบราว์เซอร์เท่านั้น เปิด URL พร้อม `?debug=1` เพื่อดู console log ระดับ info/warn จาก `DEBUG_MODULE` (error แสดงเสมอไม่ต้องเปิด flag)
-- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v9`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
+- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v11`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
+  - **⚠️ push ไป GitHub ไม่ได้ทำให้ production อัปเดตอัตโนมัติ** — Worker `count-time-of-pm-500a-b` บน Cloudflare dashboard (Workers & Pages) โชว์ว่าเชื่อมกับ repo นี้ แต่ deploy จริงเป็นแบบ **"Manually deployed"** เท่านั้น ต้องเข้า [Cloudflare dashboard](https://dash.cloudflare.com) → Workers & Pages → `count-time-of-pm-500a-b` → กด **"New deployment"** → เลือก **"file"** → อัปโหลด `index.html`, `app.js`, `sw.js`, `manifest.webmanifest` (ไม่ต้องอัปโหลด `icons/` ซ้ำถ้าไม่ได้แก้) → กด **"Deploy"** ทุกครั้งหลัง push ที่แก้ไฟล์เหล่านี้ ไม่งั้นหน้างานจะยังใช้โค้ดเก่าอยู่ (สาเหตุของบั๊ก "ลบ session/filter history แล้วไม่หายจริง" เมื่อ 2569-08-06)
 
 ## Architecture
 
