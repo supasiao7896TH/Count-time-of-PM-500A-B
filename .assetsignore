@@ -1,0 +1,10 @@
+node_modules
+.git
+.github
+.wrangler
+wrangler.jsonc
+CLAUDE.md
+agents.md
+context.md
+README.md
+supasit-brand-footer.html
