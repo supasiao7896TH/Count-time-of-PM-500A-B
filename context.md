@@ -42,6 +42,10 @@ unit_resets        { equipment (key): 'A'|'B', lastResetAt, pmTargetDays, filter
 filter_changes     { id (autoInc), equipment: 'A'|'B', changedAt, cost, note }
 ```
 
+## Brand footer
+
+ท้ายหน้า (fixed bottom, สูง 64px) มี mark แบรนด์ **A(i)CODER "D1 — Neon Arcade / plate"** ฝังเป็น inline animated SVG ใน `index.html` (อัปเดต 2569-08-07 แทนที่โลโก้เก่า "Supasit@1981th") ที่มาไฟล์ต้นฉบับ: repo private `supasiao7896TH/claude-config` โฟลเดอร์ `branding/` — รายละเอียดกฎการใช้ดูใน `CLAUDE.md` หัวข้อ Brand Rules
+
 ## ข้อจำกัด / สิ่งที่รู้อยู่แล้ว
 
 - มี cloud sync แล้ว (Firestore realtime mirror ข้ามเครื่อง PC) แต่ export→import JSON ในเมนูตั้งค่ายังมีไว้เป็น backup/migration เพิ่มเติม ไม่ใช่วิธีซิงค์หลัก

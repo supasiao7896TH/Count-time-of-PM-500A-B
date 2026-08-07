@@ -1,7 +1,7 @@
 'use strict';
 
 // Bump this on every deploy to invalidate the old cache.
-const CACHE_NAME = 'pm500-tracker-v13';
+const CACHE_NAME = 'pm500-tracker-v14';
 
 const APP_SHELL = [
   './',

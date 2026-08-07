@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **รันแอป local**: ไม่มี build step — แต่ **ห้ามเปิดผ่าน `file://` ตรงๆ** เพราะฟีเจอร์ "ส่งออกสำเนาแอปแบบ Standalone" (`APP_CORE.handleExportStandaloneHtml`, `app.js` ~บรรทัด 2167) ใช้ `fetch('index.html')`/`fetch('app.js')` โหลดตัวเอง ซึ่ง `fetch()` ใช้ไม่ได้กับ `file://` ต้องรันผ่าน static server เช่น `python -m http.server` ที่ root repo แล้วเปิด `http://localhost:8000`
 - **Test / Lint**: ไม่มี test suite, ไม่มี lint config, ไม่มี CI/CD ในโปรเจกต์นี้ — ตรวจสอบด้วยการรันจริงในเบราว์เซอร์เท่านั้น เปิด URL พร้อม `?debug=1` เพื่อดู console log ระดับ info/warn จาก `DEBUG_MODULE` (error แสดงเสมอไม่ต้องเปิด flag)
-- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v13`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
+- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v14`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
   - **มี GitHub Actions auto-deploy แล้ว** (`.github/workflows/deploy.yml`, ตั้งแต่ 2569-08-06) — push เข้า `main` จะรัน `wrangler deploy` ให้อัตโนมัติผ่าน `wrangler.jsonc` โดย runner ของ GitHub เอง (ไม่ต้องมี Node.js/wrangler ในเครื่อง PC เลยสักเครื่อง) **แต่ต้องตั้ง GitHub Secret ชื่อ `CLOUDFLARE_API_TOKEN` ในหน้า repo Settings ก่อนถึงจะทำงานได้** — ถ้ายังไม่ได้ตั้ง workflow นี้จะ fail และต้อง fallback ไป deploy manual ผ่าน [Cloudflare dashboard](https://dash.cloudflare.com) → Workers & Pages → `count-time-of-pm-500a-b` → "New deployment" → "file" → อัปโหลด `index.html`/`app.js`/`sw.js`/`manifest.webmanifest` → "Deploy" แทน (วิธีนี้คือสาเหตุของบั๊ก "ลบ session/filter history แล้วไม่หายจริง" เมื่อ 2569-08-06 ที่ลืม deploy หลัง push)
 
 ## Architecture
@@ -25,7 +25,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `sw.js` (63 บรรทัด) — service worker (ดูหัวข้อ PWA ด้านล่าง)
 - `manifest.webmanifest` — PWA manifest, `orientation: "landscape"` (ตั้งใจให้ใช้แนวนอน), `lang: "th"`
 - `agents.md`, `context.md` — เอกสารเสริมที่ repo root สำหรับคนอ่าน **แต่ไม่ถูก Claude Code auto-load** (auto-load เฉพาะ `CLAUDE.md` ตาม global config ของพี่ A) กฎสำคัญจากทั้งสองไฟล์ถูกดึงมารวมใน `CLAUDE.md` นี้แล้ว — ถ้าจะแก้กฎเหล่านี้ในอนาคต ควร sync กลับไปที่ 2 ไฟล์นั้นด้วยเพื่อไม่ให้เอกสารขัดกัน
-- `supasit-brand-footer.html` — ไฟล์เดี่ยวๆ ที่ไม่ถูก reference จากไฟล์ไหนเลยในโปรเจกต์ (dead file, น่าจะเป็น template badge "by Supasit.A" ที่ยังไม่ได้เอามาใช้จริงตาม Brand Rules ด้านล่าง) — อย่าสมมติว่ามันถูกโหลดอยู่จริง
+- `supasit-brand-footer.html` — ไฟล์เดี่ยวๆ ที่ไม่ถูก reference จากไฟล์ไหนเลยในโปรเจกต์ (**ไม่ใช่ dead file ในความหมายที่ไม่มีผลใดๆ** — เนื้อหาเดิมของมัน คือ footer badge แบรนด์เก่า "Supasit@1981th" ธงชาติ+อุ้งเท้า ถูก copy ไปวางเป็น markup จริงใน `index.html` ตั้งแต่ก่อนหน้านี้แล้ว และตอนนี้ถูกแทนที่ด้วยแบรนด์ใหม่ A(i)CODER แล้วตามหัวข้อ Brand Rules ด้านล่าง — **ไฟล์นี้เองยังเป็นของเก่าที่ไม่ sync กับ markup ปัจจุบัน** ห้ามใช้เป็น reference)
 
 ### 8 IIFE Modules ใน `app.js` (ห้ามเพิ่ม module ใหม่โดยไม่จำเป็น, ห้ามสร้าง global function ลอยนอก module — ยกเว้น clickjacking bust-out ที่บรรทัด 1–8 ซึ่งตั้งใจให้อยู่นอก module เพื่อรันก่อนสุด)
 
@@ -58,7 +58,7 @@ Import ข้อมูล (แทนที่ทั้งหมด) และก
 
 ### PWA / Service Worker (`sw.js`)
 
-- `CACHE_NAME = 'pm500-tracker-v13'` — ต้อง bump ทุกครั้งที่แก้ `app.js`/`index.html`/`manifest.webmanifest`
+- `CACHE_NAME = 'pm500-tracker-v14'` — ต้อง bump ทุกครั้งที่แก้ `app.js`/`index.html`/`manifest.webmanifest`
 - Same-origin GET request: cache-first + background revalidation (เขียน response ใหม่กลับเข้า cache ด้วย) fallback ไป network แล้ว fallback ไป stale cache ถ้า network ล่ม (non-GET request ถูก ignore)
 - Google Fonts (`fonts.googleapis.com`/`fonts.gstatic.com`): stale-while-revalidate — เป็น progressive enhancement เท่านั้น (แอปต้องอ่านออกได้แม้โหลด font ไม่สำเร็จ)
 - request ของ Firestore เป็น cross-origin + non-GET จึงไม่ถูก sw แตะเลย (ตั้งใจ — ห้ามเพิ่ม cache ให้เส้นทางนี้ ไม่งั้น realtime sync จะได้ข้อมูลเก่า)
@@ -72,7 +72,13 @@ Import ข้อมูล (แทนที่ทั้งหมด) และก
 - ภาษา UI เป็นภาษาไทยทั้งหมด รวม error message และ toast, วันที่แสดงแบบ พ.ศ. (BE_OFFSET = 543), timezone คงที่ Asia/Bangkok (UTC+7) ไม่สนใจ timezone เครื่อง
 - Dark/Light mode ผ่าน CSS variables + `data-theme` attribute (ค่าเริ่มต้น `auto` ตาม `prefers-color-scheme`), เก็บค่าไว้ที่ `localStorage['pm500_theme']` (แยกจาก IndexedDB)
 - ปุ่ม/label ใหม่ใช้ emoji นำหน้าแบบเดียวกับปุ่มเดิม (🧰 ⚙️ 📖 ฯลฯ) เพื่อความสม่ำเสมอ, modal ใหม่ใช้ class `.modal-overlay` + `.modal` เดิม (เพิ่ม `.modal-wide` ถ้าต้องการพื้นที่มากกว่า 460px)
-- Glass badge "by Supasit.A" — ยังไม่มีในแอปนี้ (แอปนี้สร้างก่อนกฎ brand ปัจจุบัน — ไม่บังคับเพิ่มย้อนหลังถ้าพี่ A ไม่ได้ขอ ดู `supasit-brand-footer.html` ด้านบน)
+- **Brand footer (2569-08-07)** — ท้าย `<body>` ใน `index.html` มี `.brand-footer` fixed bottom สูง 64px พื้นหลัง `#F7F5FB` ฝัง animated SVG มาร์ก **A(i)CODER "D1 — Neon Arcade / plate" โดยตรง** (inline ทั้งก้อน ไม่ใช่ `<img>`/fetch เพราะ CSP + มาตรฐาน Single HTML File) — ที่มา: repo private `supasiao7896TH/claude-config` โฟลเดอร์ `branding/exports/d1-neon-arcade-plate.svg` (ดู `branding/README.md` ในนั้นสำหรับกฎการใช้ direction อื่น เช่น D2 สำหรับพื้นหลังมืด, D3 สำหรับไอคอนเล็ก/favicon)
+  - เลือก variant **"plate"** (มีพื้นหลัง `#F7F5FB` + hairline บนล่างในตัวเอง) ไม่ใช่ "bare" เพราะ D1 **ห้ามอยู่บนพื้นมืดเด็ดขาด** ตามกฎแบรนด์ — variant นี้พกพื้นหลังสีขาวของตัวเองมาด้วยเสมอ จึงยังชัดเจนแม้ผู้ใช้สลับเป็น Dark mat ของแอป (ทดสอบแล้วผ่านทั้ง 2 theme)
+  - ขนาดที่ฝัง: `width="200" height="50"` (ลดจากต้นฉบับ 1200×300 คงสัดส่วน 4:1) — **ต่ำกว่าเกณฑ์ขั้นต่ำที่แบรนด์แนะนำ (240px) โดยตั้งใจ** ตามที่พี่ A ขอให้เล็กลงอีกนิด (2569-08-07) รู้ทั้งรู้ว่าเสี่ยง bloom ทับ counter ของตัวอักษรที่จอเล็กมากๆ — ถ้าพี่ A รู้สึกว่าเบลอเกินไปให้กลับไปที่ 240×60
+  - `(i)` (วงเล็บ+ตัว i) ถูกเปลี่ยนจากสีม่วง `#B39DF3` เดิมเป็น `#FF5C8A` (`--sc-pink` จาก palette เดียวกัน ตัวเดียวกับที่ใช้กับปี "2025") **เฉพาะ 3 กลุ่มนี้เท่านั้น** — ตัวอักษรอื่น (A/C/O/D/E/R) ยังเป็นม่วงเดิม ถ้าจะแก้สีอื่น หา `<g fill="#FF5C8A"` 3 จุดที่มี `rect x="363"`/`x="402"`/`x="441"` (y=105) เป็นตัวไล่ตำแหน่ง
+  - มี CSS animation กระพริบแบบนีออนในตัว (`.tube`/`.tube-s`/`.tube-b`) เคารพ `prefers-reduced-motion` อยู่แล้วในตัว SVG เอง — **ห้ามลบ `<style>` block ข้างในตอนแก้ไข**
+  - `.wrap` มี `padding-bottom: 96px` (เดิม 64px) เพื่อกันเนื้อหาโดนแถบ footer นี้บัง — ถ้าแก้ความสูง `.brand-footer` ต้องปรับค่านี้ตามด้วยเสมอ
+  - ของเดิมก่อนหน้านี้ (โลโก้ "Supasit@1981th" ธงชาติ+อุ้งเท้า) ถูกถอดออกทั้งหมดแล้ว (CSS class `.brand-flag`/`.brand-name`/`.brand-paws`/`.brand-paw` ถูกลบ เหลือแค่ `.brand-footer` กับ `.brand-footer svg`)
 
 ## Current Phase
 
@@ -85,7 +91,7 @@ Import ข้อมูล (แทนที่ทั้งหมด) และก
 
 - ยังไม่มีอัตโนมัติแจ้งเตือนแบบ push notification — ต้องเปิดแอปเองถึงจะเห็นป้ายเตือน (long-run / PM overdue / filter overdue)
 - Export "สำเนาแอปแบบ Standalone" ต้องเปิดผ่าน http(s) เท่านั้น (fetch `index.html`/`app.js` ใช้ไม่ได้ถ้าเปิดแบบ `file://` ตรงๆ)
-- `supasit-brand-footer.html` เป็นไฟล์ที่ไม่ถูกใช้งานจริง (dead file) — อย่าสับสนว่ามันถูก render อยู่
+- `supasit-brand-footer.html` เป็นไฟล์ template ของแบรนด์เก่า (ก่อน A(i)CODER) ไม่ตรงกับ footer badge ปัจจุบันใน `index.html` แล้ว — อย่าใช้เป็น reference, ถ้าจะทำความสะอาดควรถามพี่ A ก่อนว่าจะลบหรืออัปเดตให้ตรงของใหม่
 - **Cloud sync — ข้อจำกัดที่เหลืออยู่ (แก้รอบ 2569-08-07 ไปแล้วหลายข้อ ดู Architecture):**
   - ถ้าสองเครื่องแก้ฟิลด์ **เดียวกัน** ของ record รีเซ็ตพร้อมกันจริงๆ ยังเป็น last-write-wins (ฟิลด์ที่ต่างกันไม่ทับกันแล้ว — ดู `keepRemoteValue`)
   - `mirrorReset`/`pushDoc` เป็น fire-and-forget โดยตั้งใจ (ไม่ `await` เพราะ `runTransaction` ไม่ fail fast แล้วจะทำให้ปุ่มค้าง) ความล้มเหลวจึงรู้ผ่าน toast + badge แทนที่จะบล็อกการกดบันทึก
