@@ -13,10 +13,11 @@
 | ส่วน | เทคโนโลยี |
 |---|---|
 | UI | Vanilla HTML/CSS/JS, SVG (ท่อ/ถังแบบ animated) |
-| State | Reactive pub/sub เขียนเอง (`STATE_STORE`) |
-| Storage | IndexedDB (`pm500_tracker_db`, `DB_VERSION = 2`) |
+| State | เก็บ state กลางแบบ imperative (`STATE_STORE.set()` แล้วเรียก `UI_RENDERER` ตามหลังทันที — pub/sub API มีแต่ไม่ถูกใช้จริง ไม่ reactive) |
+| Storage | IndexedDB (`pm500_tracker_db`, `DB_VERSION = 2`) เป็น source of truth ของการอ่านทั้งหมด |
+| Cloud Sync | Firebase Firestore (compat SDK v11.6.0 จาก CDN) เป็น realtime cloud mirror ข้ามเครื่อง PC — anonymous auth ผ่าน `AUTH_PROVIDER`, มิเรอร์ผ่าน `CLOUD_SYNC_MANAGER` (monkey-patch `STORAGE_ENGINE`) แอปยังทำงาน local-only ได้ครบถ้าใช้ Firebase ไม่ได้ |
 | PWA | `manifest.webmanifest` + `sw.js` (cache-first app shell, stale-while-revalidate สำหรับ Google Fonts) |
-| Deploy | GitHub repo `supasiao7896TH/Count-time-of-PM-500A-B`, branch `main` |
+| Deploy | GitHub repo `supasiao7896TH/Count-time-of-PM-500A-B`, branch `main` — production จริงคือ Cloudflare Worker (`wrangler deploy` ผ่าน GitHub Actions) ไม่ใช่ GitHub Pages |
 
 ## ฟีเจอร์หลักที่มีอยู่ตอนนี้
 
@@ -43,7 +44,8 @@ filter_changes     { id (autoInc), equipment: 'A'|'B', changedAt, cost, note }
 
 ## ข้อจำกัด / สิ่งที่รู้อยู่แล้ว
 
-- ไม่มี cloud sync — ถ้าเปลี่ยนเครื่อง/เบราว์เซอร์ต้อง export→import ข้อมูลเอง (ฟีเจอร์นี้เพิ่งเพิ่มในเมนูตั้งค่า)
+- มี cloud sync แล้ว (Firestore realtime mirror ข้ามเครื่อง PC) แต่ export→import JSON ในเมนูตั้งค่ายังมีไว้เป็น backup/migration เพิ่มเติม ไม่ใช่วิธีซิงค์หลัก
+- ถ้าสองเครื่องแก้ฟิลด์**เดียวกัน**ของ record รีเซ็ตพร้อมกันจริงๆ ยังเป็น last-write-wins
 - ป้ายเตือนทั้งหมดเป็นแบบ pull (ต้องเปิดแอปดู) ไม่มี push notification
 - "สำเนาแอป Standalone" ใช้ `fetch()` โหลด `index.html`/`app.js` ของตัวเอง — ต้องเปิดผ่าน http/https เท่านั้น ใช้ไม่ได้ถ้าเปิดไฟล์ตรง ๆ แบบ `file://`
 

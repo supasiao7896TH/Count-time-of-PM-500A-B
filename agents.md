@@ -13,7 +13,8 @@
 ## Hard Constraints (ห้ามข้าม)
 
 - **Security**: ห้าม `innerHTML` กับข้อมูลจากผู้ใช้ (หมายเหตุ, ตัวเลข, ชื่อไฟล์ import ฯลฯ) — ใช้ `textContent` หรือ escape ก่อนแทรกใน string เสมอ (ดู `escapeHtml()` ใน `app.js` เป็นตัวอย่าง)
-- **Architecture**: JS ทั้งหมดต้องอยู่ใน IIFE module เดิม 6 ตัว (`APP_CONFIG` / `DEBUG_MODULE` / `STATE_STORE` / `STORAGE_ENGINE` / `UI_RENDERER` / `APP_CORE`) — ห้ามสร้าง global function ลอย ๆ นอก module, ห้ามเพิ่ม module ใหม่โดยไม่จำเป็น
+- **Architecture**: JS ทั้งหมดต้องอยู่ใน IIFE module เดิม 8 ตัว (`APP_CONFIG` / `DEBUG_MODULE` / `STATE_STORE` / `STORAGE_ENGINE` / `AUTH_PROVIDER` / `CLOUD_SYNC_MANAGER` / `UI_RENDERER` / `APP_CORE`) — ห้ามสร้าง global function ลอย ๆ นอก module (ยกเว้น clickjacking bust-out ที่บรรทัดบนสุดของ `app.js` ซึ่งตั้งใจให้อยู่นอก module), ห้ามเพิ่ม module ใหม่โดยไม่จำเป็น
+- **Cloud sync**: `CLOUD_SYNC_MANAGER` มิเรอร์ `STORAGE_ENGINE` ขึ้น Firestore ผ่านการ monkey-patch เมธอด — จุดที่กัน echo (`upsertLocal`/`deleteLocal`/`tryStartSessionCloud`) ต้องเรียก `orig.xxx()` เดิมเสมอ ห้ามเรียก `STORAGE_ENGINE.xxx()` ที่ถูก wrap แล้วไม่งั้นจะเกิด sync loop ห้ามใส่ค่า `undefined` ลง field ที่จะมิเรอร์ขึ้น Firestore (ใช้ `null`/default แทน — Firestore reject ทั้ง document ถ้าเจอ `undefined`) และแอปต้องทำงาน local-only ได้ครบทุกฟีเจอร์แม้ Firebase ใช้ไม่ได้
 - **IndexedDB**: `saveReset()` เป็น **full overwrite** — ทุก field ที่ไม่ส่งมาจะหายไป ทุกจุดที่เรียก `saveReset()` ต้อง carry-forward field เดิม (`lastResetAt`, `resetHistory`, `pmTargetDays`, `filterTargetHours`) เสมอ ห้ามลืมแม้แต่ field เดียว
 - **Migration**: ห้ามเปลี่ยน `DB_VERSION` โดยไม่เพิ่ม logic ใน `onupgradeneeded` ให้ backward-compatible กับข้อมูลเดิมของผู้ใช้จริง
 - **Date/Time**: ใช้ `APP_CONFIG.bangkokParts()`/`dayKey()`/`formatDateTimeBE()` เสมอสำหรับวันที่ (fixed UTC+7, พ.ศ.) — ห้ามใช้ `Date.toLocaleString()` ตรง ๆ เพราะจะพังถ้าเครื่อง user ตั้ง timezone อื่น
