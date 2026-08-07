@@ -648,6 +648,7 @@ const CLOUD_SYNC_MANAGER = (() => {
   let db = null;
   let applyingRemote = false; // true while writing a remote change into local IndexedDB, to suppress echoing it straight back to Firestore
   let onRemoteChangeCb = null;
+  let cloudWriteFailed = false; // sticky จนกว่าจะเขียนขึ้นคลาวด์สำเร็จอีกครั้ง
 
   // Flat, prefixed root-level collections (pm500_runtime_sessions,
   // pm500_unit_resets, pm500_filter_changes) — this Firebase project is
@@ -661,8 +662,30 @@ const CLOUD_SYNC_MANAGER = (() => {
   }
 
   function setSyncStatus(status) {
-    STATE_STORE.set('syncStatus', status);
-    UI_RENDERER.setSyncStatus(status);
+    // snapshot ที่ไม่เกี่ยวข้องต้องไม่ลบสถานะ 'error' ของการเขียนที่ล้มเหลวไปแล้ว —
+    // เดิม handleSnapshot บรรทัดท้ายเขียนทับกลับเป็น 'synced' ทันที ทำให้ความล้มเหลว
+    // ของการเขียนขึ้นคลาวด์มองไม่เห็นเลยทั้งที่ข้อมูลอยู่แค่ในเครื่องนี้เครื่องเดียว
+    const effective = (cloudWriteFailed && status === 'synced') ? 'error' : status;
+    STATE_STORE.set('syncStatus', effective);
+    UI_RENDERER.setSyncStatus(effective);
+  }
+
+  function noteWriteOk() {
+    cloudWriteFailed = false;
+    setSyncStatus('synced');
+  }
+
+  // เขียนขึ้นคลาวด์ไม่สำเร็จ = ข้อมูลอยู่ในเครื่องนี้เครื่องเดียว ผู้ใช้ต้องรู้ทันที
+  // log ระดับ 'error' เพื่อให้เห็นใน console โดยไม่ต้องเปิด ?debug=1
+  // toast เฉพาะครั้งแรกของชุดความล้มเหลว กัน toast ถล่มตอน importAllData วน push หลายสิบ doc
+  function noteWriteFailure(scope, err) {
+    const first = !cloudWriteFailed;
+    cloudWriteFailed = true;
+    DEBUG_MODULE.log('error', scope, err);
+    setSyncStatus('error');
+    if (first) {
+      UI_RENDERER.toast('บันทึกขึ้นคลาวด์ไม่สำเร็จ — ข้อมูลถูกบันทึกในเครื่องนี้แล้ว แต่ยังไม่ถูกส่งไปเครื่องอื่น', 'error');
+    }
   }
 
   async function pushDoc(storeName, docId, data) {
@@ -670,10 +693,9 @@ const CLOUD_SYNC_MANAGER = (() => {
     try {
       setSyncStatus('syncing');
       await colRef(storeName).doc(String(docId)).set(data);
-      setSyncStatus('synced');
+      noteWriteOk();
     } catch (err) {
-      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.push', err);
-      setSyncStatus('error');
+      noteWriteFailure('CLOUD_SYNC_MANAGER.push', err);
     }
   }
 
@@ -682,7 +704,7 @@ const CLOUD_SYNC_MANAGER = (() => {
     try {
       await colRef(storeName).doc(String(docId)).delete();
     } catch (err) {
-      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.pushDelete', err);
+      noteWriteFailure('CLOUD_SYNC_MANAGER.pushDelete', err);
     }
   }
 
@@ -732,12 +754,22 @@ const CLOUD_SYNC_MANAGER = (() => {
           }
           history.sort((a, b) => new Date(a.ts) - new Date(b.ts));
         }
-        t.set(ref, { ...record, resetHistory: history });
+        // t.set() เป็น full overwrite สำหรับฟิลด์ scalar (merge เฉพาะ resetHistory) —
+        // ถ้า record ในเครื่องนี้ยังเป็น null/undefined เพราะยังไม่ได้รับค่าล่าสุดจากคลาวด์
+        // ห้ามเขียนทับของจริงบนคลาวด์ให้หาย เช่นกดแก้ "เป้าหมาย PM" ที่เครื่องที่ยังไม่ sync
+        // แล้วไปลบ lastResetAt ของการรีเซ็ตจริงจากอีกเครื่องทิ้ง เติมเฉพาะค่าที่เป็น nullish
+        // เท่านั้น การแก้ค่าจริงของผู้ใช้จึงยังชนะเสมอ
+        const merged = { ...record, resetHistory: history };
+        if (remote) {
+          if (merged.lastResetAt == null) merged.lastResetAt = remote.lastResetAt;
+          if (merged.pmTargetDays == null) merged.pmTargetDays = remote.pmTargetDays;
+          if (merged.filterTargetHours == null) merged.filterTargetHours = remote.filterTargetHours;
+        }
+        t.set(ref, merged);
       });
-      setSyncStatus('synced');
+      noteWriteOk();
     } catch (err) {
-      DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.mirrorReset', err);
-      setSyncStatus('error');
+      noteWriteFailure('CLOUD_SYNC_MANAGER.mirrorReset', err);
     }
   }
 
@@ -915,6 +947,13 @@ const CLOUD_SYNC_MANAGER = (() => {
     try {
       await AUTH_PROVIDER.ensureReady();
       db = firebase.firestore();
+      // ต้องเรียก settings() ทันทีหลัง firebase.firestore() และก่อน operation อื่นใดบน
+      // instance นี้ ไม่งั้น compat SDK จะ throw "Firestore has already been started"
+      // ลงไปที่ catch ด้านล่าง แล้วแอปจะตกไปเป็น local-only เงียบๆ
+      // ignoreUndefinedProperties: Firestore ปฏิเสธทั้ง document ถ้ามีฟิลด์ใดเป็น undefined
+      // ในขณะที่ IndexedDB รับได้ปกติ — เดิมทำให้ทุก write ของ unit_resets (ที่มี
+      // pmTargetDays/filterTargetHours เป็น undefined) ขึ้นคลาวด์ไม่สำเร็จเลยสักครั้ง
+      db.settings({ ignoreUndefinedProperties: true });
       wrapStorageEngine();
       subscribeAll();
       setSyncStatus('synced');
@@ -1803,6 +1842,22 @@ const APP_CORE = (() => {
     resetModalUnit = null;
   }
 
+  // saveReset() เป็น full overwrite — ทุกฟิลด์ที่ไม่ส่งมาจะหายไป และทุกฟิลด์ต้องไม่เป็น
+  // undefined เพราะ Firestore ปฏิเสธทั้ง document ถ้าเจอแม้ฟิลด์เดียว (IndexedDB รับได้
+  // การเขียนในเครื่องจึงสำเร็จ แต่การมิเรอร์ขึ้นคลาวด์ล้มเหลวเงียบๆ = ต้นเหตุที่รีเซ็ตไม่ sync
+  // ข้ามเครื่อง) ค่า default ที่เดิมคำนวณตอนอ่านอย่างเดียว จึงถูกเก็บลง store จริงตั้งแต่ตอนเขียน
+  function buildResetRecord(unit, existing, patch) {
+    const base = existing || {};
+    return {
+      equipment: unit,
+      lastResetAt: base.lastResetAt || null,
+      resetHistory: base.resetHistory || [],
+      pmTargetDays: base.pmTargetDays || APP_CONFIG.DEFAULT_PM_TARGET_DAYS,
+      filterTargetHours: base.filterTargetHours || APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS,
+      ...patch,
+    };
+  }
+
   async function handleResetFormSubmit(evt) {
     evt.preventDefault();
     const errorEl = document.getElementById('resetFormError');
@@ -1842,16 +1897,13 @@ const APP_CORE = (() => {
         return;
       }
       const cumulativeSec = await STORAGE_ENGINE.getCumulativeSinceUntil(unit, resetAtISO);
-      await STORAGE_ENGINE.saveReset({
-        equipment: unit,
+      await STORAGE_ENGINE.saveReset(buildResetRecord(unit, existing, {
         lastResetAt: resetAtISO,
-        pmTargetDays: existing && existing.pmTargetDays,
-        filterTargetHours: existing && existing.filterTargetHours,
         resetHistory: [...((existing && existing.resetHistory) || []), {
           ts: resetAtISO, hoursAtReset: +(cumulativeSec / 3600).toFixed(2), note,
           pd2500Pv, pe501OpenCount, lcv2502OpenCount,
         }],
-      });
+      }));
       closeResetModal();
       await Promise.all([refreshCumulativeCards(), refreshResetInfo(), refreshResetHistory(), refreshTrendChart()]);
       UI_RENDERER.toast(`รีเซ็ตชั่วโมงสะสมของ PM-500${unit} เรียบร้อยแล้ว`);
@@ -1873,13 +1925,7 @@ const APP_CORE = (() => {
     input.value = days;
     try {
       const existing = await STORAGE_ENGINE.getReset(unit);
-      await STORAGE_ENGINE.saveReset({
-        equipment: unit,
-        lastResetAt: (existing && existing.lastResetAt) || null,
-        resetHistory: (existing && existing.resetHistory) || [],
-        pmTargetDays: days,
-        filterTargetHours: existing && existing.filterTargetHours,
-      });
+      await STORAGE_ENGINE.saveReset(buildResetRecord(unit, existing, { pmTargetDays: days }));
       await refreshCumulativeCards();
       UI_RENDERER.toast(`บันทึกเป้าหมาย PM ของ PM-500${unit} เรียบร้อยแล้ว (${days} วัน)`);
     } catch (err) {
@@ -1898,13 +1944,7 @@ const APP_CORE = (() => {
     input.value = hours;
     try {
       const existing = await STORAGE_ENGINE.getReset(unit);
-      await STORAGE_ENGINE.saveReset({
-        equipment: unit,
-        lastResetAt: (existing && existing.lastResetAt) || null,
-        resetHistory: (existing && existing.resetHistory) || [],
-        pmTargetDays: existing && existing.pmTargetDays,
-        filterTargetHours: hours,
-      });
+      await STORAGE_ENGINE.saveReset(buildResetRecord(unit, existing, { filterTargetHours: hours }));
       await refreshFilterOverdueWarnings();
       UI_RENDERER.toast(`บันทึกเป้าหมายเปลี่ยน Filter ของ PM-500${unit} เรียบร้อยแล้ว (${hours} ชม.)`);
     } catch (err) {
