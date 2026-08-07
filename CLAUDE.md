@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **รันแอป local**: ไม่มี build step — แต่ **ห้ามเปิดผ่าน `file://` ตรงๆ** เพราะฟีเจอร์ "ส่งออกสำเนาแอปแบบ Standalone" (`APP_CORE.handleExportStandaloneHtml`, `app.js` ~บรรทัด 2167) ใช้ `fetch('index.html')`/`fetch('app.js')` โหลดตัวเอง ซึ่ง `fetch()` ใช้ไม่ได้กับ `file://` ต้องรันผ่าน static server เช่น `python -m http.server` ที่ root repo แล้วเปิด `http://localhost:8000`
 - **Test / Lint**: ไม่มี test suite, ไม่มี lint config, ไม่มี CI/CD ในโปรเจกต์นี้ — ตรวจสอบด้วยการรันจริงในเบราว์เซอร์เท่านั้น เปิด URL พร้อม `?debug=1` เพื่อดู console log ระดับ info/warn จาก `DEBUG_MODULE` (error แสดงเสมอไม่ต้องเปิด flag)
-- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v12`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
+- **Deploy**: commit + push ไป branch `main` — **ต้อง bump `CACHE_NAME` ใน `sw.js` ทุกครั้ง** ที่แก้ `app.js`/`index.html`/`manifest.webmanifest` (ปัจจุบัน `pm500-tracker-v13`) ไม่งั้น service worker จะเสิร์ฟโค้ดเก่าจาก cache ให้ผู้ใช้ต่อไป
   - **มี GitHub Actions auto-deploy แล้ว** (`.github/workflows/deploy.yml`, ตั้งแต่ 2569-08-06) — push เข้า `main` จะรัน `wrangler deploy` ให้อัตโนมัติผ่าน `wrangler.jsonc` โดย runner ของ GitHub เอง (ไม่ต้องมี Node.js/wrangler ในเครื่อง PC เลยสักเครื่อง) **แต่ต้องตั้ง GitHub Secret ชื่อ `CLOUDFLARE_API_TOKEN` ในหน้า repo Settings ก่อนถึงจะทำงานได้** — ถ้ายังไม่ได้ตั้ง workflow นี้จะ fail และต้อง fallback ไป deploy manual ผ่าน [Cloudflare dashboard](https://dash.cloudflare.com) → Workers & Pages → `count-time-of-pm-500a-b` → "New deployment" → "file" → อัปโหลด `index.html`/`app.js`/`sw.js`/`manifest.webmanifest` → "Deploy" แทน (วิธีนี้คือสาเหตุของบั๊ก "ลบ session/filter history แล้วไม่หายจริง" เมื่อ 2569-08-06 ที่ลืม deploy หลัง push)
 
 ## Architecture
@@ -21,7 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### ไฟล์หลักใน repo (ไม่มี subfolder อื่นนอกจาก `icons/`)
 
 - `index.html` (815 บรรทัด) — markup ทั้งหมด + CSS inline ใน `<style>` (บรรทัด 1–382) มี CSP ผ่าน `<meta http-equiv="Content-Security-Policy">` (บรรทัด 11–20) ท้ายบอดี้โหลด Firebase compat SDK 3 ตัวจาก `gstatic.com` (app/auth/firestore) **ก่อน** `<script src="app.js">` เสมอ เพราะ `app.js` ใช้ global `firebase` ตรงๆ (ไม่มี `defer`/`async`/`type=module` พึ่งลำดับ DOM ล้วนๆ)
-- `app.js` (2710 บรรทัด) — logic ทั้งหมด แบ่งเป็น 8 IIFE module (ดูด้านล่าง) จบไฟล์ด้วย `document.addEventListener('DOMContentLoaded', () => APP_CORE.init())`
+- `app.js` (2775 บรรทัด) — logic ทั้งหมด แบ่งเป็น 8 IIFE module (ดูด้านล่าง) จบไฟล์ด้วย `document.addEventListener('DOMContentLoaded', () => APP_CORE.init())`
 - `sw.js` (63 บรรทัด) — service worker (ดูหัวข้อ PWA ด้านล่าง)
 - `manifest.webmanifest` — PWA manifest, `orientation: "landscape"` (ตั้งใจให้ใช้แนวนอน), `lang: "th"`
 - `agents.md`, `context.md` — เอกสารเสริมที่ repo root สำหรับคนอ่าน **แต่ไม่ถูก Claude Code auto-load** (auto-load เฉพาะ `CLAUDE.md` ตาม global config ของพี่ A) กฎสำคัญจากทั้งสองไฟล์ถูกดึงมารวมใน `CLAUDE.md` นี้แล้ว — ถ้าจะแก้กฎเหล่านี้ในอนาคต ควร sync กลับไปที่ 2 ไฟล์นั้นด้วยเพื่อไม่ให้เอกสารขัดกัน
@@ -32,7 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **`APP_CONFIG`** (บรรทัด 13–145) — ค่าคงที่ (`DB_NAME`, `DB_VERSION`, ชื่อ store, `UNITS`) + ฟังก์ชัน format วันที่/เวลาแบบไทย: `bangkokParts()` / `dayKey()` / `formatDateTimeBE()` (fixed UTC+7, พ.ศ.) **ต้องใช้ฟังก์ชันกลุ่มนี้เสมอสำหรับวันที่-เวลา ห้ามใช้ `Date.toLocaleString()` ตรงๆ** เพราะจะพังถ้า timezone เครื่อง user ไม่ใช่ +7
 2. **`DEBUG_MODULE`** (บรรทัด 150–161) — `log(level, scope, message, data)`, เปิด info/warn ด้วย `?debug=1`
 3. **`STATE_STORE`** (บรรทัด 166–190) — เก็บ state กลาง (`unitA`/`unitB`/`theme`/`activeView`/...) มี API `set/get/on/off` **แต่ `on`/`off` (pub/sub) ไม่ถูกเรียกใช้จริงที่ไหนเลยในโค้ด** — ในทางปฏิบัติ `APP_CORE` เรียก `STATE_STORE.set()` แล้วเรียก `UI_RENDERER.xxx()` ตามหลังทันทีแบบ imperative เสมอ **ไม่ใช่ reactive จริง — อย่าสมมติว่าการ `set()` จะ trigger re-render อัตโนมัติ**
-4. **`STORAGE_ENGINE`** (บรรทัด 195–585) — IndexedDB CRUD แบบ Promise-based, `onupgradeneeded` (บรรทัด ~204–218) สร้าง 3 store แบบ idempotent (guard ด้วย `if (!db.objectStoreNames.contains(...))`):
+4. **`STORAGE_ENGINE`** (บรรทัด 196–605) — IndexedDB CRUD แบบ Promise-based, `onupgradeneeded` (บรรทัด ~204–218) สร้าง 3 store แบบ idempotent (guard ด้วย `if (!db.objectStoreNames.contains(...))`):
 
    ```text
    runtime_sessions  { keyPath:'id', autoIncrement:true, indexes: by_equipment, by_equipment_startTime }
@@ -41,14 +41,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    ```
 
    มี `exportAllData()`/`importAllData()` (บรรทัด ~364–397) สำหรับ backup JSON — `importAllData()` จะ **wipe ทั้ง 3 store ก่อนแล้ว `put()` กลับด้วย key เดิม** (ไม่ใช่ merge)
-5. **`AUTH_PROVIDER`** (บรรทัด 599–636) — Firebase anonymous auth ไม่มีหน้า login, `Persistence.NONE` (ได้ uid ใหม่ทุกครั้งที่โหลดหน้า) Firestore rules เช็คแค่ "signed in" ไม่ได้ผูกกับ uid เพราะข้อมูลเป็นของเครื่องจักรร่วมกัน ไม่ใช่ของราย user — ใช้ project `radiosync-6662c` **ที่แชร์กับแอปอื่น (RadioSync)**
-6. **`CLOUD_SYNC_MANAGER`** (บรรทัด 645–971) — มิเรอร์ write ของ `STORAGE_ENGINE` ขึ้น Firestore แล้วดึงกลับด้วย `onSnapshot` → เขียนลง IndexedDB → เรียก `APP_CORE.refreshAll()` ทำงานโดย **monkey-patch เมธอดของ `STORAGE_ENGINE`** ใน `wrapStorageEngine()` (ไม่ใช่แก้ที่ตัว `STORAGE_ENGINE` เอง) ข้อควรรู้:
-   - collection เป็น root-level แบบมี prefix: `pm500_runtime_sessions` / `pm500_unit_resets` / `pm500_filter_changes` **ห้ามย้ายไปใต้ `artifacts/{appId}/...`** เพราะ rules ของ RadioSync จับ path นั้นไว้แล้วและจะ deny เงียบๆ
+5. **`AUTH_PROVIDER`** (บรรทัด 607–644) — Firebase anonymous auth ไม่มีหน้า login, `Persistence.NONE` (ได้ uid ใหม่ทุกครั้งที่โหลดหน้า) Firestore rules เช็คแค่ "signed in" ไม่ได้ผูกกับ uid เพราะข้อมูลเป็นของเครื่องจักรร่วมกัน ไม่ใช่ของราย user — ใช้ project `radiosync-6662c` **ที่แชร์กับแอปอื่น (RadioSync)**
+6. **`CLOUD_SYNC_MANAGER`** (บรรทัด 653–1036) — มิเรอร์ write ของ `STORAGE_ENGINE` ขึ้น Firestore แล้วดึงกลับด้วย `onSnapshot` → เขียนลง IndexedDB → เรียก `APP_CORE.refreshAll()` ทำงานโดย **monkey-patch เมธอดของ `STORAGE_ENGINE`** ใน `wrapStorageEngine()` (ไม่ใช่แก้ที่ตัว `STORAGE_ENGINE` เอง) ข้อควรรู้:
+   - collection เป็น root-level แบบมี prefix: `pm500_runtime_sessions` / `pm500_unit_resets` / `pm500_filter_changes` + `pm500_unit_locks` **ห้ามย้ายไปใต้ `artifacts/{appId}/...`** เพราะ rules ของ RadioSync จับ path นั้นไว้แล้วและจะ deny เงียบๆ
+   - `pm500_unit_locks` (doc id = `A`/`B`, ฟิลด์ `openSessionId`) ใช้เป็นเอกสารเดี่ยวสำหรับ `runTransaction` ของ `tryStartSessionCloud()` เพื่อกันการกด "เริ่มทำงาน" พร้อมกันสองเครื่องแล้วได้ session ซ้อน — **collection นี้ไม่ถูก subscribe และไม่ลง IndexedDB** (ถ้าเก็บปนใน `pm500_runtime_sessions` มันจะถูก `upsertLocal` เขียนลงเครื่องเป็น session ปลอม) lock ที่ค้างหลังกดหยุดไม่ต้องล้าง เพราะ transaction อ่าน session จริงมาเช็ค `endTime` เสมอ (self-healing)
+   - **การกัน echo ใช้การเรียกเมธอดต้นฉบับใน `orig` ไม่ใช่ flag** — `upsertLocal`/`deleteLocal`/`tryStartSessionCloud` ต้องเรียก `orig.xxx()` เสมอ ห้ามเรียก `STORAGE_ENGINE.xxx()` ที่ถูก wrap แล้ว ไม่งั้นข้อมูลที่เพิ่งรับจากคลาวด์จะถูก push กลับขึ้นไปเป็นลูป (เมธอดสำหรับ**อ่าน**ไม่เคยถูก wrap เรียกผ่าน `STORAGE_ENGINE` ได้ปกติ)
    - **`db.settings({ ignoreUndefinedProperties: true })` ต้องอยู่ทันทีหลัง `firebase.firestore()` และก่อน operation อื่นใด** ไม่งั้น compat SDK จะ throw `Firestore has already been started`
    - เขียนไม่สำเร็จให้ผ่าน `noteWriteFailure()` เสมอ (log ระดับ `error` + toast ไทย + sticky badge) **ห้าม catch แล้ว log แค่ `warn` เงียบๆ** — นั่นคือสาเหตุที่บั๊กรีเซ็ตไม่ sync ซ่อนตัวอยู่ได้นาน
    - ทุกอย่างต้อง degrade ได้: ถ้า Firebase ใช้ไม่ได้ `db` เป็น `null` แล้วแอปทำงาน local-only ครบทุกฟีเจอร์
-7. **`UI_RENDERER`** (บรรทัด 973–1587) — DOM rendering ล้วนๆ ใช้ `textContent`/escape เท่านั้น **ห้าม `innerHTML` กับข้อมูลจากผู้ใช้** (หมายเหตุ, ตัวเลข, ชื่อไฟล์ import ฯลฯ — ดู `escapeHtml()` เป็นตัวอย่าง) แจ้งเตือนผู้ใช้ผ่าน `UI_RENDERER.toast(message, type)` เท่านั้น (`type`: `'info'`/`'warn'`/`'error'`) **ห้าม `alert()`/`confirm()`**
-8. **`APP_CORE`** (บรรทัด 1589–2708) — expose แค่ `{ init }`, ทุกอย่างอื่น private — `init()` sequence: render dashboard shell → wire event ทั้งหมด → open IndexedDB → `CLOUD_SYNC_MANAGER.init(refreshAll)` (never throws) → `maybeImportSeedData()` (สำหรับไฟล์ Standalone export ที่ฝัง seed data) → `resumeOpenSessions()` (auto-close duplicate open session ถ้าเจอมากกว่า 1 ต่อเครื่องหลัง reload พร้อมบันทึก `auditLog`) → apply theme/state ที่บันทึกไว้ → `startTicker()` (1s ต่อ unit timer, 30s refresh การ์ดสะสม) → register service worker
+7. **`UI_RENDERER`** (บรรทัด 1038–1652) — DOM rendering ล้วนๆ ใช้ `textContent`/escape เท่านั้น **ห้าม `innerHTML` กับข้อมูลจากผู้ใช้** (หมายเหตุ, ตัวเลข, ชื่อไฟล์ import ฯลฯ — ดู `escapeHtml()` เป็นตัวอย่าง) แจ้งเตือนผู้ใช้ผ่าน `UI_RENDERER.toast(message, type)` เท่านั้น (`type`: `'info'`/`'warn'`/`'error'`) **ห้าม `alert()`/`confirm()`**
+8. **`APP_CORE`** (บรรทัด 1654–2773) — expose แค่ `{ init }`, ทุกอย่างอื่น private — `init()` sequence: render dashboard shell → wire event ทั้งหมด → open IndexedDB → `CLOUD_SYNC_MANAGER.init(refreshAll)` (never throws) → `maybeImportSeedData()` (สำหรับไฟล์ Standalone export ที่ฝัง seed data) → `resumeOpenSessions()` (auto-close duplicate open session ถ้าเจอมากกว่า 1 ต่อเครื่องหลัง reload พร้อมบันทึก `auditLog`) → apply theme/state ที่บันทึกไว้ → `startTicker()` (1s ต่อ unit timer, 30s refresh การ์ดสะสม) → register service worker
 
 ### Destructive actions
 
@@ -56,7 +58,7 @@ Import ข้อมูล (แทนที่ทั้งหมด) และก
 
 ### PWA / Service Worker (`sw.js`)
 
-- `CACHE_NAME = 'pm500-tracker-v12'` — ต้อง bump ทุกครั้งที่แก้ `app.js`/`index.html`/`manifest.webmanifest`
+- `CACHE_NAME = 'pm500-tracker-v13'` — ต้อง bump ทุกครั้งที่แก้ `app.js`/`index.html`/`manifest.webmanifest`
 - Same-origin GET request: cache-first + background revalidation (เขียน response ใหม่กลับเข้า cache ด้วย) fallback ไป network แล้ว fallback ไป stale cache ถ้า network ล่ม (non-GET request ถูก ignore)
 - Google Fonts (`fonts.googleapis.com`/`fonts.gstatic.com`): stale-while-revalidate — เป็น progressive enhancement เท่านั้น (แอปต้องอ่านออกได้แม้โหลด font ไม่สำเร็จ)
 - request ของ Firestore เป็น cross-origin + non-GET จึงไม่ถูก sw แตะเลย (ตั้งใจ — ห้ามเพิ่ม cache ให้เส้นทางนี้ ไม่งั้น realtime sync จะได้ข้อมูลเก่า)
@@ -84,10 +86,10 @@ Import ข้อมูล (แทนที่ทั้งหมด) และก
 - ยังไม่มีอัตโนมัติแจ้งเตือนแบบ push notification — ต้องเปิดแอปเองถึงจะเห็นป้ายเตือน (long-run / PM overdue / filter overdue)
 - Export "สำเนาแอปแบบ Standalone" ต้องเปิดผ่าน http(s) เท่านั้น (fetch `index.html`/`app.js` ใช้ไม่ได้ถ้าเปิดแบบ `file://` ตรงๆ)
 - `supasit-brand-footer.html` เป็นไฟล์ที่ไม่ถูกใช้งานจริง (dead file) — อย่าสับสนว่ามันถูก render อยู่
-- **Cloud sync — จุดที่รู้แล้วว่ายังไม่ถูกต้อง (ยังไม่ได้แก้ พี่ A ยังไม่ได้สั่ง):**
-  - `deleteLocal()` ไม่มี branch สำหรับ `unit_resets` → กด "ลบข้อมูลทั้งหมด" ที่เครื่องหนึ่ง เครื่องอื่นจะยังค้าง record รีเซ็ตเดิม (ต้องเพิ่ม `STORAGE_ENGINE.deleteReset()` ซึ่งยังไม่มี)
-  - `applyingRemote` เป็น flag ตัวเดียวใช้ร่วมกันทั้ง 3 listener และถูกถือค้างข้าม `await` → ถ้ากดบันทึกพอดีตอนกำลัง apply snapshot จากเครื่องอื่น การ push จะถูกข้ามเงียบๆ (แก้ถูกวิธีคือเลิกใช้ flag แล้วให้ `upsertLocal`/`deleteLocal` เรียกฟังก์ชัน original ที่ยังไม่ถูก wrap)
-  - `tryStartSessionCloud()` ใช้ query ไม่ใช่ transaction จึงกันการกด "เริ่มทำงาน" พร้อมกันสองเครื่องได้ไม่ 100% (ยอมรับความเสี่ยงนี้ไว้แล้วโดยตั้งใจ)
+- **Cloud sync — ข้อจำกัดที่เหลืออยู่ (แก้รอบ 2569-08-07 ไปแล้วหลายข้อ ดู Architecture):**
+  - ถ้าสองเครื่องแก้ฟิลด์ **เดียวกัน** ของ record รีเซ็ตพร้อมกันจริงๆ ยังเป็น last-write-wins (ฟิลด์ที่ต่างกันไม่ทับกันแล้ว — ดู `keepRemoteValue`)
+  - `mirrorReset`/`pushDoc` เป็น fire-and-forget โดยตั้งใจ (ไม่ `await` เพราะ `runTransaction` ไม่ fail fast แล้วจะทำให้ปุ่มค้าง) ความล้มเหลวจึงรู้ผ่าน toast + badge แทนที่จะบล็อกการกดบันทึก
+  - ถ้า `tryStartSessionCloud()` ล้มเหลว (เช่น rules ไม่ครอบ `pm500_unit_locks`) จะตกไปใช้ guard ในเครื่องอย่างเดียว การกด "เริ่มทำงาน" พร้อมกันสองเครื่องจะกลับไปมีโอกาสได้ session ซ้อน
 
 ## DO NOT
 

@@ -317,6 +317,14 @@ const STORAGE_ENGINE = (() => {
     return record;
   }
 
+  // ใช้เฉพาะตอน sync: เอกสารรีเซ็ตถูกลบจากคลาวด์ (เช่นอีกเครื่องกด "ลบข้อมูลทั้งหมด")
+  // ไม่มี UI ไหนลบ record รีเซ็ตทีละตัว และ CLOUD_SYNC_MANAGER ตั้งใจไม่ wrap ฟังก์ชันนี้
+  // เพราะต้นทางการลบมาจากคลาวด์อยู่แล้ว จึงไม่ต้อง mirror กลับขึ้นไปอีก
+  async function deleteReset(equipment) {
+    const store = await tx(APP_CONFIG.STORE_RESETS, 'readwrite');
+    await reqToPromise(store.delete(equipment));
+  }
+
   async function addFilterChange(record) {
     const full = record.id != null ? record : { ...record, id: crypto.randomUUID() };
     const store = await tx(APP_CONFIG.STORE_FILTER_CHANGES, 'readwrite');
@@ -585,7 +593,7 @@ const STORAGE_ENGINE = (() => {
   return {
     open, addSession, updateSession, deleteSession, getSessionById,
     getSessionsByEquipment, getAllSessions, getOpenSessionsFor, startSessionAtomic,
-    getReset, saveReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
+    getReset, saveReset, deleteReset, hasOverlap, effectiveDurationSec, clearAllData, getCumulativeAndTarget,
     getDailyAggregates, getMonthlyAggregates, getCumulativeSince, getCumulativeSinceUntil, getCycleUsageTrend,
     addFilterChange, updateFilterChange, deleteFilterChange, getFilterChangeById,
     getFilterChangesByEquipment, getAllFilterChanges, getHoursSinceLastFilterChange,
@@ -646,9 +654,16 @@ const CLOUD_SYNC_MANAGER = (() => {
   'use strict';
 
   let db = null;
-  let applyingRemote = false; // true while writing a remote change into local IndexedDB, to suppress echoing it straight back to Firestore
   let onRemoteChangeCb = null;
   let cloudWriteFailed = false; // sticky จนกว่าจะเขียนขึ้นคลาวด์สำเร็จอีกครั้ง
+
+  // เมธอดต้นฉบับของ STORAGE_ENGINE ที่เก็บไว้ตอน wrapStorageEngine() ก่อนถูกครอบ
+  // เดิมใช้ flag `applyingRemote` ตัวเดียวร่วมกันทั้ง 3 listener เพื่อกันการ echo
+  // (เขียน remote change ลงเครื่องแล้วถูก push กลับขึ้นคลาวด์) แต่ flag ถูกถือค้างข้าม
+  // `await` ตลอดลูปของ handleSnapshot ทำให้การกดบันทึกของผู้ใช้ที่บังเอิญตกอยู่ในช่วงนั้น
+  // ถูกข้ามการ push ไปเงียบๆ — การเรียกเมธอดต้นฉบับตรงๆ กันการ echo ได้แม่นยำกว่า
+  // โดยไม่ต้องมี window ที่ทำให้ write ของผู้ใช้หาย
+  const orig = {};
 
   // Flat, prefixed root-level collections (pm500_runtime_sessions,
   // pm500_unit_resets, pm500_filter_changes) — this Firebase project is
@@ -689,7 +704,7 @@ const CLOUD_SYNC_MANAGER = (() => {
   }
 
   async function pushDoc(storeName, docId, data) {
-    if (applyingRemote || !db) return;
+    if (!db) return;
     try {
       setSyncStatus('syncing');
       await colRef(storeName).doc(String(docId)).set(data);
@@ -700,7 +715,7 @@ const CLOUD_SYNC_MANAGER = (() => {
   }
 
   async function pushDelete(storeName, docId) {
-    if (applyingRemote || !db) return;
+    if (!db) return;
     try {
       await colRef(storeName).doc(String(docId)).delete();
     } catch (err) {
@@ -716,10 +731,13 @@ const CLOUD_SYNC_MANAGER = (() => {
   // Firestore batch write limit).
   async function clearAllCloudData() {
     if (!db) return { ok: false, reason: 'offline' };
-    const stores = [APP_CONFIG.STORE_SESSIONS, APP_CONFIG.STORE_RESETS, APP_CONFIG.STORE_FILTER_CHANGES];
+    const cols = [
+      colRef(APP_CONFIG.STORE_SESSIONS), colRef(APP_CONFIG.STORE_RESETS), colRef(APP_CONFIG.STORE_FILTER_CHANGES),
+      db.collection('pm500_unit_locks'), // ล้าง lock ของ tryStartSessionCloud ด้วย ไม่งั้นเหลือ doc ชี้ session ที่ถูกลบไปแล้ว
+    ];
     try {
-      for (const storeName of stores) {
-        const snap = await colRef(storeName).get();
+      for (const col of cols) {
+        const snap = await col.get();
         const docs = snap.docs;
         for (let i = 0; i < docs.length; i += 500) {
           const batch = db.batch();
@@ -734,12 +752,35 @@ const CLOUD_SYNC_MANAGER = (() => {
     }
   }
 
+  // ค่า default ของฟิลด์ scalar ใน record รีเซ็ต ใช้เดาว่า "เครื่องนี้ไม่ได้ตั้งค่านี้จริง"
+  // ในกรณีที่ไม่รู้ค่าก่อนหน้า (ดู keepRemoteValue)
+  const RESET_FIELD_DEFAULT = {
+    lastResetAt: null,
+    pmTargetDays: APP_CONFIG.DEFAULT_PM_TARGET_DAYS,
+    filterTargetHours: APP_CONFIG.DEFAULT_FILTER_TARGET_HOURS,
+  };
+
+  // t.set() เป็น full overwrite สำหรับฟิลด์ scalar (merge ให้เฉพาะ resetHistory) ถ้าเครื่อง
+  // ที่ยังไม่ได้รับค่าล่าสุดจากคลาวด์ไปแก้ค่าใดค่าหนึ่ง มันจะเขียนค่าอื่นๆ ของตัวเอง
+  // (ซึ่งเป็นค่า default) ทับของจริงบนคลาวด์ให้หายไปด้วย เช่นแก้ "เป้าหมาย PM" แล้วเผลอ
+  // ทับ filterTargetHours ที่อีกเครื่องตั้งไว้ 500 ให้กลายเป็น 720 หรือลบ lastResetAt ทิ้ง
+  //
+  // `before` คือ record ในเครื่องนี้ "ก่อน" การเขียนครั้งนี้ ทำให้แยกได้ว่าฟิลด์ไหนผู้ใช้
+  // ตั้งใจแก้จริง (record ต่างจาก before → ต้องชนะ) กับฟิลด์ไหนแค่ carry-forward มาเฉยๆ
+  // (เท่ากับ before → ต้องยอมให้ค่าบนคลาวด์ชนะ เพราะอาจใหม่กว่า)
+  function keepRemoteValue(field, record, before, remote) {
+    if (!remote || remote[field] == null) return false;       // คลาวด์ไม่มีอะไรให้รักษา
+    if (record[field] == null) return true;                    // เครื่องนี้ไม่มีค่า → ยึดคลาวด์
+    if (before) return record[field] === before[field];         // ไม่ได้แก้ที่เครื่องนี้ → ยึดคลาวด์
+    return record[field] === RESET_FIELD_DEFAULT[field];        // ไม่รู้ค่าก่อนหน้า → ยึดคลาวด์ถ้ายังเป็นค่า default
+  }
+
   // saveReset() is read-modify-write with an append-only resetHistory[] — a
   // plain overwrite risks clobbering a concurrent reset from another device.
   // This uses a real Firestore transaction (single-document read, fully
   // supported/consistent) to merge histories instead of blindly overwriting.
-  async function mirrorReset(record) {
-    if (applyingRemote || !db) return;
+  async function mirrorReset(record, before) {
+    if (!db) return;
     const ref = colRef(APP_CONFIG.STORE_RESETS).doc(record.equipment);
     try {
       setSyncStatus('syncing');
@@ -754,16 +795,9 @@ const CLOUD_SYNC_MANAGER = (() => {
           }
           history.sort((a, b) => new Date(a.ts) - new Date(b.ts));
         }
-        // t.set() เป็น full overwrite สำหรับฟิลด์ scalar (merge เฉพาะ resetHistory) —
-        // ถ้า record ในเครื่องนี้ยังเป็น null/undefined เพราะยังไม่ได้รับค่าล่าสุดจากคลาวด์
-        // ห้ามเขียนทับของจริงบนคลาวด์ให้หาย เช่นกดแก้ "เป้าหมาย PM" ที่เครื่องที่ยังไม่ sync
-        // แล้วไปลบ lastResetAt ของการรีเซ็ตจริงจากอีกเครื่องทิ้ง เติมเฉพาะค่าที่เป็น nullish
-        // เท่านั้น การแก้ค่าจริงของผู้ใช้จึงยังชนะเสมอ
         const merged = { ...record, resetHistory: history };
-        if (remote) {
-          if (merged.lastResetAt == null) merged.lastResetAt = remote.lastResetAt;
-          if (merged.pmTargetDays == null) merged.pmTargetDays = remote.pmTargetDays;
-          if (merged.filterTargetHours == null) merged.filterTargetHours = remote.filterTargetHours;
+        for (const field of Object.keys(RESET_FIELD_DEFAULT)) {
+          if (keepRemoteValue(field, record, before, remote)) merged[field] = remote[field];
         }
         t.set(ref, merged);
       });
@@ -773,97 +807,124 @@ const CLOUD_SYNC_MANAGER = (() => {
     }
   }
 
-  // Best-effort cross-device guard for "เริ่มทำงาน": queries Firestore for an
-  // already-open session before creating a new one. Firestore transactions
-  // only guarantee consistency for single-document reads, not arbitrary
-  // queries, so this narrows but does not fully close the race window if two
-  // devices click start within the same instant — an accepted residual risk
-  // given this app's real usage pattern (sequential shift handover, not
-  // concurrent multi-operator clicking). The existing single-tab atomic guard
-  // in STORAGE_ENGINE.startSessionAtomic() still applies underneath.
+  // เอกสาร lock ต่อ 1 unit เก็บแค่ว่า session ไหนของ unit นั้นกำลังเปิดอยู่ (`openSessionId`)
+  // แยก collection ออกมาเพราะ onSnapshot ของ pm500_runtime_sessions จะเอาเอกสารนี้ไปลง
+  // IndexedDB เป็น session ปลอมถ้าเก็บปนกัน — ต้องมี Firestore Security Rules ครอบ
+  // `pm500_unit_locks` ด้วย ไม่งั้น transaction จะถูก deny แล้วตกไปใช้ guard ในเครื่องแทน
+  function lockRef(equipment) {
+    return db.collection('pm500_unit_locks').doc(equipment);
+  }
+
+  // Cross-device guard สำหรับ "เริ่มทำงาน" — เดิมใช้ query หา open session ก่อนสร้างใหม่
+  // ซึ่ง Firestore ไม่การันตี consistency ให้ query ใน transaction (การันตีเฉพาะการอ่าน
+  // เอกสารเดี่ยว) ถ้าสองเครื่องกดพร้อมกันจึงยังได้ session ซ้อนกัน 2 อัน
+  //
+  // เวอร์ชันนี้ใช้ transaction จริงบน "เอกสารเดี่ยว" คือ lock ของ unit นั้น: อ่าน lock →
+  // อ่าน session ที่ lock ชี้อยู่ → ถ้ายังเปิดอยู่ก็ใช้ตัวนั้น ไม่งั้นสร้างใหม่พร้อมอัปเดต lock
+  // ทั้งหมดในธุรกรรมเดียว (อ่านทั้งหมดก่อนเขียนทั้งหมด ตามข้อบังคับของ Firestore)
+  // ถ้าอีกเครื่องชนะการแข่ง Firestore จะ retry ธุรกรรมนี้ให้เองแล้วเห็น lock ใหม่ →
+  // ได้ session เดียวกันแทนที่จะสร้างซ้อน
+  //
+  // lock ที่ค้างอยู่หลังกด "หยุด" ไม่ต้องล้าง เพราะเราอ่าน session จริงมาเช็ค endTime เสมอ
+  // เจอว่าปิดแล้วก็สร้างรอบใหม่ทับได้เลย (self-healing)
   async function tryStartSessionCloud(equipment) {
-    const snap = await colRef(APP_CONFIG.STORE_SESSIONS)
-      .where('equipment', '==', equipment).where('endTime', '==', null).limit(1).get();
-    if (!snap.empty) {
-      const remoteSession = snap.docs[0].data();
-      const local = await STORAGE_ENGINE.getSessionById(remoteSession.id);
-      applyingRemote = true;
-      try {
-        const adopted = local || await STORAGE_ENGINE.addSession(remoteSession);
-        return { created: false, session: adopted };
-      } finally { applyingRemote = false; }
-    }
-    const newId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const session = {
-      id: newId, equipment, startTime: now, endTime: null, durationSec: null,
-      isManualEntry: false, isEdited: false,
-      auditLog: [{ ts: now, action: 'start' }],
-      createdAt: now, updatedAt: now,
-    };
-    await colRef(APP_CONFIG.STORE_SESSIONS).doc(newId).set(session);
-    applyingRemote = true;
-    try { await STORAGE_ENGINE.addSession(session); }
-    finally { applyingRemote = false; }
-    return { created: true, session };
+    const sessions = colRef(APP_CONFIG.STORE_SESSIONS);
+    const lock = lockRef(equipment);
+    let outcome = null;
+    await db.runTransaction(async (t) => {
+      const lockSnap = await t.get(lock);
+      const openId = lockSnap.exists ? lockSnap.data().openSessionId : null;
+      if (openId) {
+        const sessionSnap = await t.get(sessions.doc(String(openId)));
+        if (sessionSnap.exists && sessionSnap.data().endTime == null) {
+          outcome = { created: false, session: sessionSnap.data() };
+          return;
+        }
+      }
+      const now = new Date().toISOString();
+      const session = {
+        id: crypto.randomUUID(), equipment, startTime: now, endTime: null, durationSec: null,
+        isManualEntry: false, isEdited: false,
+        auditLog: [{ ts: now, action: 'start' }],
+        createdAt: now, updatedAt: now,
+      };
+      t.set(sessions.doc(session.id), session);
+      t.set(lock, { equipment, openSessionId: session.id, updatedAt: now });
+      outcome = { created: true, session };
+    });
+    // เขียนลงเครื่องด้วยเมธอดต้นฉบับ ไม่ให้ push กลับขึ้นคลาวด์ซ้ำ (ธุรกรรมข้างบนเขียนไปแล้ว)
+    const local = await STORAGE_ENGINE.getSessionById(outcome.session.id);
+    if (!local) await orig.addSession(outcome.session);
+    return outcome;
   }
 
   function wrapStorageEngine() {
     const se = STORAGE_ENGINE;
 
-    const origAddSession = se.addSession;
+    // เก็บต้นฉบับไว้ใน `orig` (module scope) ให้ upsertLocal/deleteLocal/
+    // tryStartSessionCloud เรียกใช้ได้ — นั่นคือกลไกกัน echo ที่มาแทน flag applyingRemote
+    orig.addSession = se.addSession;
+    orig.updateSession = se.updateSession;
+    orig.deleteSession = se.deleteSession;
+    orig.startSessionAtomic = se.startSessionAtomic;
+    orig.saveReset = se.saveReset;
+    orig.addFilterChange = se.addFilterChange;
+    orig.updateFilterChange = se.updateFilterChange;
+    orig.deleteFilterChange = se.deleteFilterChange;
+    orig.importAllData = se.importAllData;
+
     se.addSession = async (session) => {
-      const result = await origAddSession(session);
+      const result = await orig.addSession(session);
       pushDoc(APP_CONFIG.STORE_SESSIONS, result.id, result);
       return result;
     };
 
-    const origUpdateSession = se.updateSession;
     se.updateSession = async (id, patch) => {
-      const result = await origUpdateSession(id, patch);
+      const result = await orig.updateSession(id, patch);
       pushDoc(APP_CONFIG.STORE_SESSIONS, result.id, result);
       return result;
     };
 
-    const origDeleteSession = se.deleteSession;
     se.deleteSession = async (id) => {
-      await origDeleteSession(id);
+      await orig.deleteSession(id);
       pushDelete(APP_CONFIG.STORE_SESSIONS, id);
     };
 
-    const origStartSessionAtomic = se.startSessionAtomic;
     se.startSessionAtomic = async (equipment) => {
-      if (db && !applyingRemote) {
+      if (db) {
         try { return await tryStartSessionCloud(equipment); }
         catch (err) { DEBUG_MODULE.log('warn', 'CLOUD_SYNC_MANAGER.startSessionAtomic', err); }
       }
-      return origStartSessionAtomic(equipment);
+      // fallback: guard ในเครื่องอย่างเดียว (Firebase ใช้ไม่ได้ หรือธุรกรรมข้างบนล้มเหลว)
+      // origStartSessionAtomic ไม่ push ขึ้นคลาวด์เอง ถ้ายังต่อคลาวด์ได้จึง push ให้ด้วย
+      // ไม่งั้น session ที่กำลังเดินเครื่องอยู่จะไม่โผล่ที่เครื่องอื่นจนกว่าจะกดหยุด
+      const result = await orig.startSessionAtomic(equipment);
+      if (db && result.created) pushDoc(APP_CONFIG.STORE_SESSIONS, result.session.id, result.session);
+      return result;
     };
 
-    const origSaveReset = se.saveReset;
     se.saveReset = async (record) => {
-      const result = await origSaveReset(record);
-      mirrorReset(result);
+      // อ่านค่าเดิมก่อนเขียนทับ เพื่อให้ mirrorReset แยกออกว่าฟิลด์ไหนผู้ใช้ตั้งใจแก้จริง
+      const before = await STORAGE_ENGINE.getReset(record.equipment);
+      const result = await orig.saveReset(record);
+      mirrorReset(result, before);
       return result;
     };
 
-    const origAddFilterChange = se.addFilterChange;
     se.addFilterChange = async (record) => {
-      const result = await origAddFilterChange(record);
+      const result = await orig.addFilterChange(record);
       pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, result.id, result);
       return result;
     };
 
-    const origUpdateFilterChange = se.updateFilterChange;
     se.updateFilterChange = async (id, patch) => {
-      const result = await origUpdateFilterChange(id, patch);
+      const result = await orig.updateFilterChange(id, patch);
       pushDoc(APP_CONFIG.STORE_FILTER_CHANGES, result.id, result);
       return result;
     };
 
-    const origDeleteFilterChange = se.deleteFilterChange;
     se.deleteFilterChange = async (id) => {
-      await origDeleteFilterChange(id);
+      await orig.deleteFilterChange(id);
       pushDelete(APP_CONFIG.STORE_FILTER_CHANGES, id);
     };
 
@@ -871,9 +932,8 @@ const CLOUD_SYNC_MANAGER = (() => {
     // this is a deliberate "restore backup, replace everything" action the
     // user already confirmed via confirmPhrase, and now that replace applies
     // to the shared team dataset too (see confirm-phrase copy update).
-    const origImportAllData = se.importAllData;
     se.importAllData = async (data) => {
-      await origImportAllData(data);
+      await orig.importAllData(data);
       if (!db) return;
       for (const s of (data.sessions || [])) pushDoc(APP_CONFIG.STORE_SESSIONS, s.id, s);
       for (const r of (data.resets || [])) pushDoc(APP_CONFIG.STORE_RESETS, r.equipment, r);
@@ -886,28 +946,35 @@ const CLOUD_SYNC_MANAGER = (() => {
     // result surfaced to the user (see handleClearAllDataRequest).
   }
 
+  // เขียน remote change ลง IndexedDB ด้วยเมธอด "ต้นฉบับ" เสมอ เพื่อไม่ให้ถูก push
+  // กลับขึ้นคลาวด์เป็น echo (ข้อมูลนี้เพิ่งมาจากคลาวด์อยู่แล้ว) — การอ่านไม่เคยถูก wrap
+  // จึงเรียกผ่าน STORAGE_ENGINE ได้ตามปกติ
   async function upsertLocal(storeName, data) {
     if (storeName === APP_CONFIG.STORE_RESETS) {
-      await STORAGE_ENGINE.saveReset(data);
+      await orig.saveReset(data);
     } else if (storeName === APP_CONFIG.STORE_SESSIONS) {
       const existing = await STORAGE_ENGINE.getSessionById(data.id);
-      if (existing) await STORAGE_ENGINE.updateSession(data.id, data);
-      else await STORAGE_ENGINE.addSession(data);
+      if (existing) await orig.updateSession(data.id, data);
+      else await orig.addSession(data);
     } else if (storeName === APP_CONFIG.STORE_FILTER_CHANGES) {
       const existing = await STORAGE_ENGINE.getFilterChangeById(data.id);
-      if (existing) await STORAGE_ENGINE.updateFilterChange(data.id, data);
-      else await STORAGE_ENGINE.addFilterChange(data);
+      if (existing) await orig.updateFilterChange(data.id, data);
+      else await orig.addFilterChange(data);
     }
   }
 
   async function deleteLocal(storeName, id) {
-    if (storeName === APP_CONFIG.STORE_SESSIONS) await STORAGE_ENGINE.deleteSession(id);
-    else if (storeName === APP_CONFIG.STORE_FILTER_CHANGES) await STORAGE_ENGINE.deleteFilterChange(id);
+    if (storeName === APP_CONFIG.STORE_SESSIONS) await orig.deleteSession(id);
+    else if (storeName === APP_CONFIG.STORE_FILTER_CHANGES) await orig.deleteFilterChange(id);
+    // doc id ของ unit_resets คือ equipment ('A'/'B') ตรงกับ keyPath ของ store พอดี
+    // เดิมไม่มี branch นี้ กด "ลบข้อมูลทั้งหมด" ที่เครื่องหนึ่งแล้วอีกเครื่องยังค้าง
+    // lastResetAt เดิมถาวร ทำให้การ์ดชั่วโมงสะสมของเครื่องนั้นผิดโดยไม่มีใครรู้
+    // (deleteReset ไม่ถูก wrap อยู่แล้ว จึงเรียกผ่าน STORAGE_ENGINE ได้ตรงๆ)
+    else if (storeName === APP_CONFIG.STORE_RESETS) await STORAGE_ENGINE.deleteReset(id);
   }
 
   async function handleSnapshot(storeName, snapshot) {
     let changed = false;
-    applyingRemote = true;
     try {
       for (const change of snapshot.docChanges()) {
         if (change.type === 'removed') await deleteLocal(storeName, change.doc.id);
@@ -916,8 +983,6 @@ const CLOUD_SYNC_MANAGER = (() => {
       }
     } catch (err) {
       DEBUG_MODULE.log('error', 'CLOUD_SYNC_MANAGER.handleSnapshot', err);
-    } finally {
-      applyingRemote = false;
     }
     if (changed && onRemoteChangeCb) {
       try { await onRemoteChangeCb(); } catch (err) { DEBUG_MODULE.log('error', 'CLOUD_SYNC_MANAGER.onRemoteChange', err); }
